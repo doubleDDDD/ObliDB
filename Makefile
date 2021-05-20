@@ -31,7 +31,7 @@
 
 ######## My hackish flags for testing ##########
 #My_Flags := -DBLOCK_DATA_SIZE=${BLOCK_DATA_SIZE} -DNUM_BLOCKS_POW=${NUM_BLOCKS_POW} -DTEST_TYPE=${TEST_TYPE}
-
+My_Flags := -Wno-write-strings -w
 
 ######## SGX SDK Settings ########
 
@@ -39,7 +39,8 @@
 SGX_SDK ?= /opt/intel/sgxsdk
 SGX_MODE ?= HW
 SGX_ARCH ?= x64
-SGX_DEBUG ?= 0
+# SGX_DEBUG ?= 0
+SGX_DEBUG ?= 1
 
 ifeq ($(shell getconf LONG_BIT), 32)
 	SGX_ARCH := x86
@@ -82,10 +83,10 @@ else
 	Urts_Library_Name := sgx_urts
 endif
 
-App_Cpp_Files := isv_app/isv_app.cpp isv_enclave/definitions.cpp
+App_Cpp_Files := isv_app/isv_app.cpp isv_enclave/definitions.cpp  # 它俩先组成一个模块，代表的是访问数据库的 app
 App_Include_Paths := -Iservice_provider -Iisv_enclave -I$(SGX_SDK)/include
 
-App_C_Flags := $(SGX_COMMON_CFLAGS) -fPIC -Wno-attributes $(App_Include_Paths) #$(My_Flags)
+App_C_Flags := $(SGX_COMMON_CFLAGS) -fPIC -Wno-attributes $(App_Include_Paths) $(My_Flags)
 
 # Three configuration modes - Debug, prerelease, release
 #   Debug - Macro DEBUG enabled.
@@ -99,14 +100,15 @@ else
         App_C_Flags += -DNDEBUG -UEDEBUG -UDEBUG
 endif
 
-App_Cpp_Flags := $(App_C_Flags) -std=c++11 #$(My_Flags)
+App_Cpp_Flags := $(App_C_Flags) -std=c++11 $(My_Flags)
 App_Link_Flags := $(SGX_COMMON_CFLAGS) -L$(SGX_LIBRARY_PATH) -l$(Urts_Library_Name) -L. -lsgx_ukey_exchange -lpthread -lservice_provider -Wl,-rpath=$(CURDIR)/sample_libcrypto -Wl,-rpath=$(CURDIR)
 
 ifneq ($(SGX_MODE), HW)
 	App_Link_Flags += -lsgx_uae_service_sim
 else
-	App_Link_Flags += -lsgx_epid
-	App_Link_Flags += -lsgx_quote_ex
+# App_Link_Flags += -lsgx_epid
+# App_Link_Flags += -lsgx_quote_ex
+	App_Link_Flags += -lsgx_uae_service
 endif
 
 App_Cpp_Objects := $(App_Cpp_Files:.cpp=.o)
@@ -118,8 +120,8 @@ SP_Crypto_Library_Name := sample_libcrypto
 ServiceProvider_Cpp_Files := service_provider/ecp.cpp service_provider/network_ra.cpp service_provider/service_provider.cpp service_provider/ias_ra.cpp
 ServiceProvider_Include_Paths := -I$(SGX_SDK)/include -I$(SGX_SDK)/include/tlibc -I$(SGX_SDK)/include/stlport -I$(SP_Crypto_Library_Name)
 
-ServiceProvider_C_Flags := $(SGX_COMMON_CFLAGS) -fPIC -Wno-attributes -I$(SGX_SDK)/include -I$(SP_Crypto_Library_Name) #$(My_Flags)
-ServiceProvider_Cpp_Flags := $(ServiceProvider_C_Flags) -std=c++11 #$(My_Flags)
+ServiceProvider_C_Flags := $(SGX_COMMON_CFLAGS) -fPIC -Wno-attributes -I$(SGX_SDK)/include -I$(SP_Crypto_Library_Name) $(My_Flags)
+ServiceProvider_Cpp_Flags := $(ServiceProvider_C_Flags) -std=c++11 $(My_Flags)
 ServiceProvider_Link_Flags :=  -shared $(SGX_COMMON_CFLAGS) -L$(SGX_LIBRARY_PATH) -l$(SP_Crypto_Library_Name) -L$(SP_Crypto_Library_Name)
 
 ServiceProvider_Cpp_Objects := $(ServiceProvider_Cpp_Files:.cpp=.o)
@@ -139,8 +141,8 @@ Enclave_Headers := isv_enclave/isv_enclave.h
 Enclave_Cpp_Files := isv_enclave/isv_enclave.cpp isv_enclave/definitions.cpp isv_enclave/enclave_db.cpp isv_enclave/enclave_tests.cpp isv_enclave/enclave_data_structures.cpp isv_enclave/bplustree.cpp
 Enclave_Include_Paths := -I$(SGX_SDK)/include -I$(SGX_SDK)/include/tlibc -I$(SGX_SDK)/include/stlport -I$(SGX_SDK)/include/libcxx
 
-Enclave_C_Flags := $(SGX_COMMON_CFLAGS) -nostdinc -fvisibility=hidden -fpie -fstack-protector $(Enclave_Include_Paths) #$(My_Flags)
-Enclave_Cpp_Flags := $(Enclave_C_Flags) -std=c++03 -nostdinc++ #$(My_Flags)
+Enclave_C_Flags := $(SGX_COMMON_CFLAGS) -nostdinc -fvisibility=hidden -fpie -fstack-protector $(Enclave_Include_Paths) $(My_Flags)
+Enclave_Cpp_Flags := $(Enclave_C_Flags) -std=c++03 -nostdinc++ $(My_Flags)
 
 # To generate a proper enclave, it is recommended to follow below guideline to link the trusted libraries:
 #    1. Link sgx_trts with the `--whole-archive' and `--no-whole-archive' options,
@@ -159,6 +161,7 @@ Enclave_Link_Flags := $(SGX_COMMON_CFLAGS) -Wl,--no-undefined -nostdlib -nodefau
 
 Enclave_Cpp_Objects := $(Enclave_Cpp_Files:.cpp=.o)
 
+# 这部分相当于数据库的内核
 Enclave_Name := isv_enclave.so
 Signed_Enclave_Name := isv_enclave.signed.so
 Enclave_Config_File := isv_enclave/isv_enclave.config.xml
@@ -249,6 +252,7 @@ libservice_provider.so: $(ServiceProvider_Cpp_Objects)
 
 ######## Enclave Objects ########
 
+# makefile会生成c
 isv_enclave/isv_enclave_t.c: $(SGX_EDGER8R) isv_enclave/isv_enclave.edl
 	@cd isv_enclave && $(SGX_EDGER8R) --trusted ../isv_enclave/isv_enclave.edl --search-path ../isv_enclave --search-path $(SGX_SDK)/include
 	@echo "GEN  =>  $@"

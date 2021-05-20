@@ -59,10 +59,13 @@
 #include "sgx_urts.h"
 
 // Needed to query extended epid group id.
-#include "sgx_uae_epid.h"
+// #include "sgx_uae_epid.h"
+#include "sgx_uae_service.h"
 
 #include "service_provider.h"
 #include "../isv_enclave/definitions.h"//structs, enums, fixed constants
+
+#include "extraio.h"
 
 #ifndef SAFE_FREE
 #define SAFE_FREE(ptr) {if (NULL != (ptr)) {free(ptr); (ptr) = NULL;}}
@@ -74,7 +77,11 @@
 #include "sample_messages.h"
 
 
-#define ENCLAVE_PATH "isv_enclave.signed.so"
+//#define ENCLAVE_PATH "isv_enclave.signed.so"
+#define ENCLAVE_PATH "./isv_enclave.signed.so"
+
+
+// oblidbextraio::StorageEngine* storageengine[NUM_STRUCTURES] = {nullptr};
 
 
 //use these to keep track of all the structures and their types (added by me, not part of sample code)
