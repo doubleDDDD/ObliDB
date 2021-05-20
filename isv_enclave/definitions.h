@@ -11,6 +11,7 @@
 #include "string.h"
 
 
+/* 块的大小与数据集的行大小相关 */
 #define BLOCK_DATA_SIZE 512
 //#define BLOCK_DATA_SIZE 2048
 
@@ -141,6 +142,17 @@ struct Condition{
 	Condition *nextCondition;
 };
 
+/* read or write type */
+typedef enum _RW_TYPE {
+	MEMORY,
+	DISK
+} RW_Type;
+
+typedef enum _TABLE_TYPE {
+	NORMAL,
+	RET,
+	TEMP
+} TABLE_TYPE;
 
 int getEncBlockSize(Obliv_Type type);
 int getBlockSize(Obliv_Type type);

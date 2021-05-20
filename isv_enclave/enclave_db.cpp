@@ -88,20 +88,37 @@ int rowMatchesCondition(Condition c, uint8_t* row, Schema s){
 	return 1;
 }
 
-
-int createTable(Schema *schema, char* tableName, int nameLen, Obliv_Type type, int numberOfRows, int* structureId){
+int createTable(
+	Schema *schema, char* tableName, 
+	int nameLen, Obliv_Type type, int numberOfRows, int* structureId)
+{
+	/* in sgx */
 	//structureId should be -1 unless we want to force a particular structure for testing
 	sgx_status_t retVal = SGX_SUCCESS;
 
+	TABLE_TYPE tabletype = NORMAL;
+
+	char *tmp = "Temp";
+	char *ret = "Return";
+
+	if(strstr(tableName, ret)){tabletype = RET;} 
+	else if (strstr(tableName, tmp)){tabletype = TEMP;}
+
 	//validate schema a little bit
-	if(schema->numFields > MAX_COLS) return 1;
+	if(schema->numFields > MAX_COLS) {
+		/* rdb 有最大列数要求 */
+		return 1;
+	}
 	int rowSize = getRowSize(schema);
 	//printf("row size: %d\n", rowSize);
-	if(rowSize <= 0) return rowSize;
-	if(BLOCK_DATA_SIZE/rowSize == 0) {//can't fit a row in a block of the data structure!
+	if(rowSize <= 0) {return rowSize;}
+	if(BLOCK_DATA_SIZE/rowSize == 0) {
+		// can't fit a row in a block of the data structure!
+		// 一个page都放不下一个row是需要额外的处理方法的
 		return 4;
 	}
-	if(PADDING > 0){
+	if(PADDING > 0) {
+		// padding means 填充
 		numberOfRows = PADDING;
 	}
 
@@ -110,11 +127,16 @@ int createTable(Schema *schema, char* tableName, int nameLen, Obliv_Type type, i
 		//if max order gets too small, replace 1.1 with something bigger
 		numberOfRows = numberOfRows *1.1 -1; //need a larger memory, to store all the tree
 	}
-	if(type == TYPE_TREE_ORAM || type == TYPE_ORAM) numberOfRows = nextPowerOfTwo(numberOfRows+1) - 1; //get rid of the if statement to pad all tables to next power of 2 size
+	if(type == TYPE_TREE_ORAM || type == TYPE_ORAM) {
+		numberOfRows = nextPowerOfTwo(numberOfRows+1) - 1;
+	} //get rid of the if statement to pad all tables to next power of 2 size
+
 	numberOfRows += (numberOfRows == 0);
 	int initialSize = numberOfRows;
-	retVal = init_structure(initialSize, type, structureId);
-	if(retVal != SGX_SUCCESS) return 5;
+
+	// structureId 会被分配一个表号
+	retVal = init_structure(initialSize, type, structureId, tabletype);
+	if(retVal != SGX_SUCCESS) {return 5;}
 
 	//size & type are set in init_structure, but we need to initiate the rest
 	tableNames[*structureId] = (char*)malloc(nameLen+1);
@@ -786,8 +808,8 @@ int joinTables(char* tableName1, char* tableName2, int joinCol1, int joinCol2, i
 	uint8_t* row; //= (uint8_t*)malloc(BLOCK_DATA_SIZE);
 	uint8_t* row1; //= (uint8_t*)malloc(BLOCK_DATA_SIZE);
 	uint8_t* row2; //= (uint8_t*)malloc(BLOCK_DATA_SIZE);
-	char* retTableName = "JoinTable";
-	char* realRetTableName = "JoinReturn";
+	char* retTableName = "ReturnJoinTable";
+	char* realRetTableName = "RealReturnJoinTable";
 	int retStructId = -1;
 	int realRetStructId = -1;
 	int dummyVal = 0;
@@ -1947,7 +1969,10 @@ extern int indexSelect(char* tableName, int colChoice, Condition c, int aggregat
 //groupCol = -1 means not to order or group by, aggregate = -1 means no aggregate, aggregate = 0 count, 1 sum, 2 min, 3 max, 4 mean
 //including algChoice in case I need to use it later to choose among algorithms
 //select column colNum; if colChoice = -1, select all columns
-int selectRows(char* tableName, int colChoice, Condition c, int aggregate, int groupCol, int algChoice, int intermediate) {
+int selectRows(
+	char* tableName, int colChoice, 
+	Condition c, int aggregate, int groupCol, int algChoice, int intermediate) 
+{
 	int structureId = getTableId(tableName);
 	Obliv_Type type = oblivStructureTypes[structureId];
 	int colChoiceSize = BLOCK_DATA_SIZE;
@@ -2308,7 +2333,7 @@ int selectRows(char* tableName, int colChoice, Condition c, int aggregate, int g
 				//query plan gives away that there's only one row to return, so padding doesn't hide anything extra
 
 				int baseline=0, baselineId=-1;
-				char *tempName = "temp";
+				char *tempName = "Temp";
 				Oram_Block* oBlock;
 				if(intermediate == 2 || intermediate == 3){
 					baseline =1;
@@ -3215,7 +3240,7 @@ int saveIndexTable(char* tableName, int tableSize){
 		stashScan++;
 	}
 	for(int i = 0; i < logicalSizes[structureId]; i++){
-		ocall_read_block(structureId, i, sizeof(Encrypted_Oram_Bucket), encBucket);
+		ocall_read_block(structureId, i, sizeof(Encrypted_Oram_Bucket), encBucket, MEMORY);
 		if(decryptBlock(encBucket, bucket, obliv_key, TYPE_ORAM) != 0) return 1;
 		ocall_write_file(&bucket[0], sizeof(Oram_Bucket), tableSize);
 	}
@@ -3252,14 +3277,14 @@ int loadIndexTable(int tableSize){
 	}
 	//ocall_read_file(&stashes[structureId][0], sizeof(Oram_Block)*stashOccs[structureId]);
 	//printf("here %d %d %d %d %d\n", oblivStructureSizes[structureId], rowsPerBlock[structureId], logicalSizes[structureId], numRows[structureId], stashOccs[structureId]);
-	ocall_newStructure(structureId, TYPE_TREE_ORAM, oblivStructureSizes[structureId]);
+	ocall_newStructure(structureId, TYPE_TREE_ORAM, oblivStructureSizes[structureId], NORMAL);
 	for(int i = 0; i < logicalSizes[structureId]; i++){
 		//printf("here1 %d %d %d", i, sizeof(Oram_Bucket), sizeof(Encrypted_Oram_Bucket));
 		ocall_read_file(&bucket[0], sizeof(Oram_Bucket));
 		//printf("here2 %d %d %d", i, bucket->blocks[0].actualAddr, bucket->blocks[0].data[0]);
 		if(encryptBlock(encBucket, bucket, obliv_key, TYPE_ORAM) != 0) return 1;
 		//printf("here3 %d", i);
-		ocall_write_block(structureId, i, sizeof(Encrypted_Oram_Bucket), encBucket);
+		ocall_write_block(structureId, i, sizeof(Encrypted_Oram_Bucket), encBucket, MEMORY);
 		//printf("here4 %d\n", i);
 	}
 	return 0;

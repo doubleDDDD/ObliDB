@@ -39,10 +39,16 @@ int freeBlock(int structureId, int blockNum){
 	return 0;
 }
 
-
-int opOneLinearScanBlock(int structureId, int index, Linear_Scan_Block* block, int write){
-
-	if(MIXED_USE_MODE && !write){//need to do this fast without breaking other stuff or interfaces
+/**
+ * in sgx
+ * block is pointer to 非可信区
+ * in rdb, one row to one block, insert one row to db
+ */
+int opOneLinearScanBlock(
+	int structureId, int index, Linear_Scan_Block* block, int write)
+{
+	if(MIXED_USE_MODE && !write) {
+		//need to do this fast without breaking other stuff or interfaces
 		//praise be to God that the formats have the same size for one block
 		//that will let me treat an oram block as a real linear scan block
 		int size = oblivStructureSizes[structureId];
@@ -53,7 +59,7 @@ int opOneLinearScanBlock(int structureId, int index, Linear_Scan_Block* block, i
 		int realSize = size*4;
 		if(i%4 == 0){//need to open a new block
 			Encrypted_Oram_Bucket* encBucket = (Encrypted_Oram_Bucket*)malloc(encBlockSize);
-			ocall_read_block(structureId, i/4, encBlockSize, encBucket);
+			ocall_read_block(structureId, i/4, encBlockSize, encBucket, MEMORY);
 			if(decryptBlock(encBucket, &linOramCache, obliv_key, TYPE_ORAM) != 0) return 1;//printf("here 2\n");
 			free(encBucket);
 		}
@@ -87,14 +93,20 @@ int opOneLinearScanBlock(int structureId, int index, Linear_Scan_Block* block, i
 	Encrypted_Linear_Scan_Block* realEnc = (Encrypted_Linear_Scan_Block*)malloc(encBlockSize);
 	memcpy(real->data, block, BLOCK_DATA_SIZE);
 
-	if(write){//we leak whether an op is a read or a write; we could hide it, but it may not be necessary?
+	if(write){
+		//we leak whether an op is a read or a write; we could hide it, but it may not be necessary?
 		real->actualAddr = i;
 		real->revNum = revNum[structureId][i]+1;
 		revNum[structureId][i]++;
-		if(encryptBlock(realEnc, real, obliv_key, TYPE_LINEAR_SCAN)!=0) return 1; //replace encryption of real with encryption of block
-		ocall_write_block(structureId, i, encBlockSize, realEnc);//printf("here 3\n");
-	}else{//printf("here0");
-		ocall_read_block(structureId, i, encBlockSize, realEnc);//printf("here\n");
+		if(encryptBlock(realEnc, real, obliv_key, TYPE_LINEAR_SCAN)!=0) {
+			//replace encryption of real with encryption of block
+			return 1;
+		}
+		/* out sgx to write */
+		ocall_write_block(structureId, i, encBlockSize, realEnc, MEMORY);
+	} else {
+		/* out sgx to read */
+		ocall_read_block(structureId, i, encBlockSize, realEnc, MEMORY);
 		//printf("beginning of mac(op)? %d\n", realEnc->macTag[0]);
 		if(decryptBlock(realEnc, real, obliv_key, TYPE_LINEAR_SCAN) != 0) return 1;//printf("here 2\n");
 		if(!MIXED_USE_MODE && real->actualAddr != i && real->actualAddr != -1){
@@ -135,10 +147,10 @@ int opLinearScanBlock(int structureId, int index, Linear_Scan_Block* block, int 
 		if(i == index){//printf("begin real\n");
 			if(write){//we leak whether an op is a read or a write; we could hide it, but it may not be necessary?
 				if(encryptBlock(realEnc, block, obliv_key, TYPE_LINEAR_SCAN)!=0) return 1; //replace encryption of real with encryption of block
-				ocall_write_block(structureId, i, encBlockSize, realEnc);
+				ocall_write_block(structureId, i, encBlockSize, realEnc, MEMORY);
 			}//printf("end real\n");
 			else{
-				ocall_read_block(structureId, i, encBlockSize, realEnc);//printf("here\n");
+				ocall_read_block(structureId, i, encBlockSize, realEnc, MEMORY);//printf("here\n");
 				//printf("beginning of mac(op)? %d\n", realEnc->macTag[0]);
 				if(decryptBlock(realEnc, real, obliv_key, TYPE_LINEAR_SCAN) != 0) return 1;
 			}
@@ -147,10 +159,10 @@ int opLinearScanBlock(int structureId, int index, Linear_Scan_Block* block, int 
 		else{//printf("begin dummy\n");
 			if(write){
 				if(encryptBlock(dummyEnc, dummy, obliv_key, TYPE_LINEAR_SCAN)!=0) return 1;
-				ocall_write_block(structureId, i, encBlockSize, dummyEnc);
+				ocall_write_block(structureId, i, encBlockSize, dummyEnc, MEMORY);
 			}//printf("end dummy\n");
 			else{
-				ocall_read_block(structureId, i, encBlockSize, dummyEnc);
+				ocall_read_block(structureId, i, encBlockSize, dummyEnc, MEMORY);
 				//printf("beginning of mac(op)? %d\n", dummyEnc->macTag[0]);
 				if(decryptBlock(dummyEnc, dummy, obliv_key, TYPE_LINEAR_SCAN)!=0) return 1;
 			}
@@ -181,22 +193,22 @@ int opLinearScanUnencryptedBlock(int structureId, int index, Linear_Scan_Block* 
 
 	for(int i = 0; i < size; i++){
 		if(i == index){
-			ocall_read_block(structureId, i, blockSize, real);
+			ocall_read_block(structureId, i, blockSize, real, MEMORY);
 			//printf("beginning of mac(op)? %d\n", realEnc->macTag[0]);
 			//if(decryptBlock(realEnc, real, obliv_key, TYPE_LINEAR_SCAN) != 0) return 1;
 			if(write){//we leak whether an op is a read or a write; we could hide it, but it may not be necessary?
 				//if(encryptBlock(realEnc, block, obliv_key, TYPE_LINEAR_SCAN)!=0) return 1; //replace encryption of real with encryption of block
-				ocall_write_block(structureId, i, blockSize, real);
+				ocall_write_block(structureId, i, blockSize, real, MEMORY);
 			}
 
 		}
 		else{
-			ocall_read_block(structureId, i, blockSize, dummy);
+			ocall_read_block(structureId, i, blockSize, dummy, MEMORY);
 			//printf("beginning of mac(op)? %d\n", dummyEnc->macTag[0]);
 			//if(decryptBlock(dummyEnc, dummy, obliv_key, TYPE_LINEAR_SCAN)!=0) return 1;
 			if(write){
 				//if(encryptBlock(dummyEnc, dummy, obliv_key, TYPE_LINEAR_SCAN)!=0) return 1;
-				ocall_write_block(structureId, i, blockSize, dummy);
+				ocall_write_block(structureId, i, blockSize, dummy, MEMORY);
 			}
 		}
 	}
@@ -255,10 +267,10 @@ int opOramBlock(int structureId, int index, Oram_Block* retBlock, int write){
 		//read in bucket at depth i on path to oldLeaf
 		//encrypt/decrypt buckets all at once instead of blocks
 		//let index be the node number in a levelorder traversal and size the encBucketSize
-		ocall_read_block(structureId, nodeNumber, encBucketSize, encBucket);//printf("here %d %d %d\n", nodeNumber, treeSize, oldLeaf);
+		ocall_read_block(structureId, nodeNumber, encBucketSize, encBucket, MEMORY);//printf("here %d %d %d\n", nodeNumber, treeSize, oldLeaf);
 		if(decryptBlock(encBucket, bucket, obliv_key, TYPE_ORAM) != 0) return 1;
 		//write back dummy blocks to replace blocks we just took out
-		ocall_write_block(structureId, nodeNumber, encBucketSize, encJunk);
+		ocall_write_block(structureId, nodeNumber, encBucketSize, encJunk, MEMORY);
 		for(int j = 0; j < BUCKET_SIZE;j++){
 			//printf("saw block %d  ", bucket->blocks[j].actualAddr);
 			if(bucket->blocks[j].actualAddr != -1){
@@ -337,7 +349,7 @@ int opOramBlock(int structureId, int index, Oram_Block* retBlock, int write){
 		int div = pow((double)2, ((int)log2(treeSize+1.1)-1)-i);
 		//printf("nodeNumber: %d\n", nodeNumber);
 		//read contents of bucket
-		ocall_read_block(structureId, nodeNumber, encBucketSize, encBucket);
+		ocall_read_block(structureId, nodeNumber, encBucketSize, encBucket, MEMORY);
 		if(decryptBlock(encBucket, bucket, obliv_key, TYPE_ORAM) != 0) return 1;
 
 		//for each dummy entry in bucket, fill with candidates from stash
@@ -373,7 +385,7 @@ int opOramBlock(int structureId, int index, Oram_Block* retBlock, int write){
 		//write bucket back to tree
 		//printf("blocks we are inserting at this level: %d %d %d %d\n", currentBucket.blocks[0].actualAddr, currentBucket.blocks[1].actualAddr, currentBucket.blocks[2].actualAddr,currentBucket.blocks[3].actualAddr);
 		if(encryptBlock(encBucket, bucket, obliv_key, TYPE_ORAM) != 0) return 1;
-		ocall_write_block(structureId, nodeNumber, encBucketSize, encBucket);
+		ocall_write_block(structureId, nodeNumber, encBucketSize, encBucket, MEMORY);
 		nodeNumber = (nodeNumber-1)/2;
 	}
 
@@ -407,7 +419,9 @@ sgx_status_t oramDistribution(int structureId) {
 		int depthCount = 0;
 		for (int k = 0; k < (int)pow((double)2, i)-.9; k++){
 			//printf("reading block %d\n", (int)(pow((double)2, i)-.9)+k);
-			ocall_read_block((double)structureId, (int)(pow((double)2, i)-.9)+k, encBucketSize, encBucket);//printf("here\n");
+			ocall_read_block(
+				(double)structureId, (int)(pow((double)2, i)-.9)+k, 
+				encBucketSize, encBucket, MEMORY);//printf("here\n");
 			if(decryptBlock(encBucket, bucket, obliv_key, TYPE_ORAM) != 0) {
 				printf("fail\n");
 				return SGX_ERROR_UNEXPECTED;
@@ -506,13 +520,13 @@ int opOramBlockSafe(int structureId, int index, Oram_Block* retBlock, int write)
 		//read in bucket at depth i on path to oldLeaf
 		//encrypt/decrypt buckets all at once instead of blocks
 		//let index be the node number in a levelorder traversal and size the encBucketSize
-		ocall_read_block(structureId, nodeNumber, encBucketSize, encBucket);//printf("here\n");
+		ocall_read_block(structureId, nodeNumber, encBucketSize, encBucket, MEMORY);//printf("here\n");
 		if(decryptBlock(encBucket, bucket, obliv_key, TYPE_ORAM) != 0) {
 			printf("fail position 2\n");
 			return 1;
 		}
 		//write back dummy blocks to replace blocks we just took out
-		ocall_write_block(structureId, nodeNumber, encBucketSize, encJunk);
+		ocall_write_block(structureId, nodeNumber, encBucketSize, encJunk, MEMORY);
 		for(int j = 0; j < BUCKET_SIZE;j++){
 			//printf("saw block %d  ", bucket->blocks[j].actualAddr);
 			if(bucket->blocks[j].actualAddr != -1){
@@ -573,7 +587,7 @@ int opOramBlockSafe(int structureId, int index, Oram_Block* retBlock, int write)
 		//printf("nodeNumber: %d\n", nodeNumber);
 		int div = pow((double)2, ((int)log2(treeSize+1.1)-1)-i);
 		//read contents of bucket
-		ocall_read_block(structureId, nodeNumber, encBucketSize, encBucket);//printf("here\n");
+		ocall_read_block(structureId, nodeNumber, encBucketSize, encBucket, MEMORY);//printf("here\n");
 		if(decryptBlock(encBucket, bucket, obliv_key, TYPE_ORAM) != 0) {
 			printf("fail position 3\n");
 			return 1;
@@ -614,7 +628,7 @@ int opOramBlockSafe(int structureId, int index, Oram_Block* retBlock, int write)
 			printf("fail position 4\n");
 			return 1;
 		}
-		ocall_write_block(structureId, nodeNumber, encBucketSize, encBucket);
+		ocall_write_block(structureId, nodeNumber, encBucketSize, encBucket, MEMORY);
 		nodeNumber = (nodeNumber-1)/2;
 	}
 
@@ -734,7 +748,11 @@ int decryptBlock(void *ct, void *pt, sgx_aes_gcm_128bit_key_t *key, Obliv_Type t
 	return retVal;
 }
 
-int getNextId(){
+/**
+ * sgx内部的，多线程需要被保护起来的
+ * TODO sgx内部可以用锁么
+ */
+int getNextId() {
 	int ret = -1;
 	for(int i = 0; i < NUM_STRUCTURES; i++){
 		if(oblivStructureSizes[i] == 0) {
@@ -750,18 +768,45 @@ sgx_status_t total_init(){ //get key
 	return sgx_read_rand((unsigned char*) obliv_key, sizeof(sgx_aes_gcm_128bit_key_t));
 }
 
-sgx_status_t init_structure(int size, Obliv_Type type, int* structureId){//size in blocks
+/**
+ * size is row number
+ */
+sgx_status_t init_structure(
+	int size, Obliv_Type type, int* structureId, TABLE_TYPE tabletype)
+{
+	//size in blocks
+	// in sgx
 	sgx_status_t ret = SGX_SUCCESS;
+
+	RW_Type rwtype;
+	switch (tabletype)
+	{
+	case RET:
+	case TEMP:
+		rwtype = MEMORY;
+		break;
+	default:
+		rwtype = DISK;
+		break;
+	}
+
     int newId = getNextId();
-    if(newId == -1) return SGX_ERROR_UNEXPECTED;
-    if(*structureId != -1) newId = *structureId;
+    if(newId == -1) {
+		/* 表的数量超过限制 */
+		return SGX_ERROR_UNEXPECTED;
+	}
+    if(*structureId != -1) {newId = *structureId;}
     int logicalSize = size;
     logicalSizes[newId] = logicalSize;
-	int encBlockSize = getEncBlockSize(type);
-	int blockSize = getBlockSize(type);
+	int encBlockSize = getEncBlockSize(type);  /* 加密后块的大小，就是一个结构体的大小 */
+	int blockSize = getBlockSize(type);  /* 裸块的大小，就是一个结构体的大小 */
     //printf("initcheck1\n");
+
+	/* 这里会分配 sgx 堆上的内存，所以 table 的行号是受限于 sgx 的大小的 */
 	revNum[newId] = (int*)malloc(logicalSize*sizeof(int));
 	memset(&revNum[newId][0], 0, logicalSize*sizeof(int));
+	printf(
+		"allocate memory in sgx heap\n", logicalSize*sizeof(int));
 
     if(type == TYPE_ORAM || type == TYPE_TREE_ORAM) {
     	blockSize = sizeof(Oram_Bucket);
@@ -787,7 +832,7 @@ sgx_status_t init_structure(int size, Obliv_Type type, int* structureId){//size 
 	oblivStructureSizes[newId] = size;
 	oblivStructureTypes[newId] = type;
 	int ret2 = 0;
-	ocall_newStructure(newId, type, size);
+	ocall_newStructure(newId, type, size, tabletype);  /* 调用sgx之外 */
 
 	//printf("initcheck3\n");
 
@@ -820,12 +865,11 @@ sgx_status_t init_structure(int size, Obliv_Type type, int* structureId){//size 
 	//printf("enclave: initializing %d blocks\n", size);
 	//write junk to every block of data structure
 	//printf("block size to write: %d\n", encBlockSize);
-	for(int i = 0; i < size; i++)
-	{
-			//printf("about to write to encrypted block %d of size %d... ", i, encBlockSize);
-			if(!encJunk) printf("buffer is null pointer!");
-			ocall_write_block(newId, i, encBlockSize, encJunk);
-			//printf("written\n");
+	for(int i = 0; i < size; i++){
+		//printf("about to write to encrypted block %d of size %d... ", i, encBlockSize);
+		if(!encJunk) {printf("buffer is null pointer!");}
+		ocall_write_block(newId, i, encBlockSize, encJunk, rwtype);  /* 创建表的过程中会直接把表写一遍 */
+		//printf("written\n");
 	}
 	//printf("enclave: done initializing structure\n");
 	*structureId = newId;

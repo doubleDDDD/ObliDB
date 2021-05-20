@@ -81,10 +81,8 @@
 #define ENCLAVE_PATH "./isv_enclave.signed.so"
 
 
-// oblidbextraio::StorageEngine* storageengine[NUM_STRUCTURES] = {nullptr};
-
-
 //use these to keep track of all the structures and their types (added by me, not part of sample code)
+// 目前的set支持10张表，NUM_STRUCTURES=10，10张表可以都在一个file里搞定
 int oblivStructureSizes[NUM_STRUCTURES] = {0};
 int oblivStructureTypes[NUM_STRUCTURES] = {0};
 uint8_t* oblivStructures[NUM_STRUCTURES] = {0}; //hold pointers to start of each oblivious data structure
@@ -95,6 +93,34 @@ uint8_t* msg2_samples[] = { msg2_sample1, msg2_sample2 };
 uint8_t* msg3_samples[MSG3_BODY_SIZE] = { msg3_sample1, msg3_sample2 };
 uint8_t* attestation_msg_samples[] =
     { attestation_msg_sample1, attestation_msg_sample2};
+
+oblidbextraio::StorageEngine* storageengine = nullptr;
+
+void ConnectDB(){
+    /* init db, 打开数据库，即open, 就是连接数据库的过程，这个地方就是 single thread */
+    std::string db_file_name = "/home/hdd/workspace/ssd_mount/dbpath/oblidbtest.odb";
+
+    struct stat buffer;
+    bool is_file_exist = (stat(db_file_name.c_str(), &buffer) == 0);
+    storageengine = new oblidbextraio::StorageEngine(db_file_name);
+
+    if (!is_file_exist) {
+        oblidbextraio::page_id_t header_page_id;
+
+        auto header_page = 
+            static_cast<oblidbextraio::HeaderPage *>(storageengine->buffer_pool_manager_->NewPage(header_page_id));  /* new的过程本身是加锁的 */
+        assert(header_page_id == HEADER_PAGE_ID);
+        header_page->WLatch();
+        header_page->Init();
+        storageengine->buffer_pool_manager_->UnpinPage(header_page_id, true);  /* 虽然没有任何写操作，但是必须dirty */
+        header_page->WUnlatch();
+    }
+}
+
+void CloseDB(){
+    storageengine->buffer_pool_manager_->FlushAllDirtyPage();
+    delete storageengine;
+}
 
 // Some utility functions to output some of the data structures passed between
 // the ISV app and the remote attestation service provider.
@@ -200,26 +226,49 @@ void ocall_print(const char *str)
      * the input string to prevent buffer overflow.
      */
     printf("%s", str);
-    fflush(stdout);
+    fflush(stdout);  /* 立刻输出 */
 }
 
-void ocall_read_block(int structureId, int index, int blockSize, void *buffer){ //read in to buffer
-	if(blockSize == 0){
-		printf("unkown oblivious data type\n");
-		return;
-	}//printf("heer\n");fflush(stdout);
-	//printf("index: %d, blockSize: %d structureId: %d\n", index, blockSize, structureId);
-	//printf("start %d, addr: %d, expGap: %d\n", oblivStructures[structureId], oblivStructures[structureId]+index*blockSize, index*blockSize);fflush(stdout);
-	memcpy(buffer, oblivStructures[structureId]+((long)index*blockSize), blockSize);//printf("heer\n");fflush(stdout);
-	//printf("beginning of mac(app)? %d\n", ((Encrypted_Linear_Scan_Block*)(oblivStructures[structureId]+(index*encBlockSize)))->macTag[0]);
-	//printf("beginning of mac(buf)? %d\n", ((Encrypted_Linear_Scan_Block*)(buffer))->macTag[0]);
-
-}
-void ocall_write_block(int structureId, int index, int blockSize, void *buffer){ //write out from buffer
+void ocall_read_block(
+    int structureId, int index, int blockSize, void *buffer, RW_Type rwtype)
+{
+	//read in to buffer
 	if(blockSize == 0){
 		printf("unkown oblivious data type\n");
 		return;
 	}
+
+
+	//printf("heer\n");fflush(stdout);
+	//printf("index: %d, blockSize: %d structureId: %d\n", index, blockSize, structureId);
+	//printf("start %d, addr: %d, expGap: %d\n", oblivStructures[structureId], oblivStructures[structureId]+index*blockSize, index*blockSize);fflush(stdout);
+	
+	//printf("beginning of mac(app)? %d\n", ((Encrypted_Linear_Scan_Block*)(oblivStructures[structureId]+(index*encBlockSize)))->macTag[0]);
+	//printf("beginning of mac(buf)? %d\n", ((Encrypted_Linear_Scan_Block*)(buffer))->macTag[0]);
+
+	// 纯内存数据库 memcpy 就 ok
+	// memcpy(
+	// 	buffer, oblivStructures[structureId]+((long)index*blockSize), blockSize);//printf("heer\n");fflush(stdout);
+}
+
+/**
+ * write out from buffer
+ * index is the row number
+ */
+void ocall_write_block(
+    int structureId, int index, int blockSize, void *buffer, RW_Type rwtype)
+{
+	if(blockSize == 0){
+		printf("unkown oblivious data type\n");
+		return;
+	}
+
+    if(rwtype == MEMORY){
+        memcpy(oblivStructures[structureId]+((long)index*blockSize), buffer, blockSize);
+    } else {
+        assert(storageengine);
+    }
+
 	//printf("data: %d %d %d %d\n", structureId, index, blockSize, ((int*)buffer)[0]);fflush(stdout);
 	//printf("data: %d %d %d\n", structureId, index, blockSize);fflush(stdout);
 
@@ -228,7 +277,6 @@ void ocall_write_block(int structureId, int index, int blockSize, void *buffer){
 		printf("in structure 3");fflush(stdout);
 	}*/
 	//printf("here! blocksize %d, index %d, structureId %d\n", blockSize, index, structureId);
-	memcpy(oblivStructures[structureId]+((long)index*blockSize), buffer, blockSize);
 	//printf("here2\n");
 	//debug code
 	//printf("pointer 1 %p, pointer 2 %p, difference %d\n", oblivStructures[structureId], oblivStructures[structureId]+(index*encBlockSize), (index*encBlockSize));
@@ -239,23 +287,80 @@ void ocall_respond( uint8_t* message, size_t message_size, uint8_t* gcm_mac){
 	printf("ocall response\n");
 }
 
-void ocall_newStructure(int newId, Obliv_Type type, int size){ //this is actual size, the logical size will be smaller for orams
-    //printf("app: initializing structure type %d of capacity %d blocks\n", type, size);
+void newStructureinmemory(int newId, Obliv_Type type, int size)
+{
     int encBlockSize = getEncBlockSize(type);
-    if(type == TYPE_ORAM || type == TYPE_TREE_ORAM) encBlockSize = sizeof(Encrypted_Oram_Bucket);
-    //printf("Encrypted blocks of this type get %d bytes of storage\n", encBlockSize);
-    oblivStructureSizes[newId] = size;
-    oblivStructureTypes[newId] = type;
-    long val = (long)encBlockSize*size;
-    //printf("mallocing %ld bytes\n", val);
+    long val = (long)encBlockSize*size; /* malloc memory in 不可信内存 */
     oblivStructures[newId] = (uint8_t*)malloc(val);
     if(!oblivStructures[newId]) {
-    	printf("failed to allocate space (%ld bytes) for structure\n", val);fflush(stdout);
+        printf("failed to allocate space (%ld bytes) for structure\n", val);
+        fflush(stdout);
     }
+
+    return;
 }
 
-void ocall_deleteStructure(int structureId){
+void newStructureinperist(int newId, Obliv_Type type, int size)
+{
+    /* create table 数据库表 */
+    assert(storageengine);
+    auto header_page =
+        static_cast<oblidbextraio::HeaderPage *>(storageengine->buffer_pool_manager_->FetchPage(HEADER_PAGE_ID));
+    if(!header_page){
+        std::cerr << "new table failure, get header page failure!" << std::endl;
+        CloseDB();
+        exit(-1);
+    }
 
+    header_page->WLatch();
+    // insert table header
+    if (!header_page->InsertRecord(std::to_string(newId), newId)){
+        std::cerr << "insert failure!" << std::endl;
+        header_page->WUnlatch();
+        CloseDB();
+        exit(-1);
+    }
+
+    storageengine->buffer_pool_manager_->UnpinPage(HEADER_PAGE_ID, true);
+    header_page->WUnlatch();
+
+    int encBlockSize = getEncBlockSize(type);
+    if(type == TYPE_ORAM || type == TYPE_TREE_ORAM) {encBlockSize = sizeof(Encrypted_Oram_Bucket);}
+    oblivStructureSizes[newId] = size;
+    oblivStructureTypes[newId] = type;
+
+    return;
+}
+
+void ocall_newStructure(int newId, Obliv_Type type, int size, TABLE_TYPE tableType)
+{
+    switch (tableType)
+    {
+    case RET:
+    case TEMP:
+        newStructureinmemory(newId, type, size);
+        break;
+    default:
+        newStructureinperist(newId, type, size);
+        break;
+    }
+
+	//this is actual size, the logical size will be smaller for orams
+    // //printf("app: initializing structure type %d of capacity %d blocks\n", type, size);
+    // int encBlockSize = getEncBlockSize(type);
+    // if(type == TYPE_ORAM || type == TYPE_TREE_ORAM) encBlockSize = sizeof(Encrypted_Oram_Bucket);
+    // //printf("Encrypted blocks of this type get %d bytes of storage\n", encBlockSize);
+    // oblivStructureSizes[newId] = size;
+    // oblivStructureTypes[newId] = type;
+    // long val = (long)encBlockSize*size;
+    // //printf("mallocing %ld bytes\n", val);
+    // oblivStructures[newId] = (uint8_t*)malloc(val);
+    // if(!oblivStructures[newId]) {
+    // 	printf("failed to allocate space (%ld bytes) for structure\n", val);fflush(stdout);
+    // }
+}
+
+void ocall_deleteStructure(int structureId) {
 	oblivStructureSizes[structureId] = 0;
 	oblivStructureTypes[structureId] = 0;
 	free(oblivStructures[structureId]); //hold pointers to start of each oblivious data structure
@@ -292,8 +397,15 @@ void ocall_read_file(void *dest, int dsize){
 	int t = 0;
 	memcpy(&t, dest, 4);
 	//printf("this funciton prints %d with %d bytes\n", t, dsize);
-
 }
+
+
+
+/**
+ *****************************
+ */
+
+
 
 void BDB1Index(sgx_enclave_id_t enclave_id, int status){
 	//block size needs to be 512
@@ -427,8 +539,14 @@ void BDB1Linear(sgx_enclave_id_t enclave_id, int status){
 	memcpy(cond.values[0], &val, 4);
 	cond.nextCondition = NULL;
 
+	// int real_rowline = 360000;
+	int real_rowline = 360;
+
 	char* tableName = "rankings";
-	createTable(enclave_id, (int*)&status, &rankingsSchema, tableName, strlen(tableName), TYPE_LINEAR_SCAN, 360010, &structureId1); //TODO temp really 360010
+	createTable(
+		enclave_id, (int*)&status, 
+		&rankingsSchema, tableName, 
+		strlen(tableName), TYPE_LINEAR_SCAN, real_rowline + 10, &structureId1); //TODO temp really 360010
 
 	std::ifstream file("rankings.csv");
 
@@ -436,7 +554,7 @@ void BDB1Linear(sgx_enclave_id_t enclave_id, int status){
 	char data[BLOCK_DATA_SIZE];
 	//file.getline(line, BLOCK_DATA_SIZE);//burn first line
 	row[0] = 'a';
-	for(int i = 0; i < 360000; i++){ //TODO temp really 360000
+	for(int i = 0; i < real_rowline; i++){ //TODO temp really real_rowline
 	//for(int i = 0; i < 1000; i++){
 		memset(row, 'a', BLOCK_DATA_SIZE);
 		file.getline(line, BLOCK_DATA_SIZE);//get the field
@@ -463,6 +581,8 @@ void BDB1Linear(sgx_enclave_id_t enclave_id, int status){
 		incrementNumRows(enclave_id, (int*)&status, structureId1);
 	}
 	printf("created BDB1 table - linear\n");
+	return;
+
 	time_t startTime, endTime;
 	double elapsedTime;
 	//printTable(enclave_id, (int*)&status, "rankings");
@@ -3514,6 +3634,9 @@ int main(int argc, char* argv[])
         fprintf(OUTPUT, "\nRemote attestation success!");
     }
 
+    /* connect to db */
+    ConnectDB();
+
     //TODO: My untrusted application code goes here
     /*
      *
@@ -3574,16 +3697,16 @@ int main(int argc, char* argv[])
         //nasdaqTables(enclave_id, status); //2048	
         //complaintTables(enclave_id, status); //4096	
         //flightTables(enclave_id, status); //512 (could be less, but we require 512 minimum)	
-        //BDB1Index(enclave_id, status);//512		
-        //BDB1Linear(enclave_id, status);//512		
+        // BDB1Index(enclave_id, status);//512		
+        BDB1Linear(enclave_id, status);//512		
         //BDB2(enclave_id, status, 0);//2048		
         //BDB2Index(enclave_id, status, 0);//2048	
         //BDB3(enclave_id, status, 0);//2048		
         //BDB2(enclave_id, status, 1);//2048 (baseline)	
         //BDB3(enclave_id, status, 1);//2048 (baseline)	
         //basicTests(enclave_id, status);//512		
-	//fabTests(enclave_id, status);//512		
-        joinTests(enclave_id, status);//512		
+		//fabTests(enclave_id, status);//512		
+        // joinTests(enclave_id, status);//512		
         //workloadTests(enclave_id, status);//512	
         //insdelScaling(enclave_id, status);//512	
 
@@ -4084,10 +4207,13 @@ CLEANUP:
             // led us to this point in the code.
             ret = ret_save;
         }
-        fprintf(OUTPUT, "\nCall enclave_ra_close success.");
+        fprintf(OUTPUT, "\nCall enclave_ra_close success.\n");
     }
 
     sgx_destroy_enclave(enclave_id);
+
+	storageengine->buffer_pool_manager_->FlushAllDirtyPage();
+	delete storageengine;
 
     //todo(Saba): need to free stuff that I used in the code I added
     /*moved up

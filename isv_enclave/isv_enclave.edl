@@ -41,10 +41,10 @@ enclave {
     untrusted {
         void ocall_print([in, string] const char *str);
         void ocall_respond([in,size=message_size] uint8_t* message, size_t message_size, [in, size=16] uint8_t* gcm_mac);//TODO
-        void ocall_read_block(int structureId, int index, int blockSize, [out, size=blockSize] void *buffer); //read in to buffer
+        void ocall_read_block(int structureId, int index, int blockSize, [out, size=blockSize] void *buffer, RW_Type rwtype); //read in to buffer
         //void ocall_read_block(int structureId, int index, int blockSize, [user_check] void *buffer); //read in to buffer, maybe this will perform better?
-        void ocall_write_block(int structureId, int index, int blockSize, [in, size=blockSize] void *buffer); //write out from buffer
-        void ocall_newStructure(int newId, Obliv_Type type, int size); //enclave asks app to allocate new structure
+        void ocall_write_block(int structureId, int index, int blockSize, [in, size=blockSize] void *buffer, RW_Type rwtype); //write out from buffer
+        void ocall_newStructure(int newId, Obliv_Type type, int size, TABLE_TYPE tableType); //enclave asks app to allocate new structure
         void ocall_deleteStructure(int structureId);
 		void ocall_write_file([in, size=dsize] const void *src, int dsize, int tableSize);
 		void ocall_open_read(int tableSize);

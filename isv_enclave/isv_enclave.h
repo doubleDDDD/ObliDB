@@ -58,7 +58,7 @@ extern int encryptBlock(void *ct, void *pt, sgx_aes_gcm_128bit_key_t *key, Obliv
 extern int decryptBlock(void *ct, void *pt, sgx_aes_gcm_128bit_key_t *key, Obliv_Type type);
 extern int getNextId();
 extern sgx_status_t total_init();
-extern sgx_status_t init_structure(int size, Obliv_Type type, int* structureId);
+extern sgx_status_t init_structure(int size, Obliv_Type type, int* structureId, TABLE_TYPE tabletype);
 extern sgx_status_t free_oram(int structureId);
 extern sgx_status_t free_structure(int structureId);
 extern int newBlock(int structureId);

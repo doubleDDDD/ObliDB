@@ -20,7 +20,7 @@ sgx_status_t testMemory(){
 
 sgx_status_t setupPerformanceTest(int structNum, int size, Obliv_Type type){
 	sgx_status_t ret = SGX_SUCCESS;
-	ret = init_structure(size, type, &structNum);
+	ret = init_structure(size, type, &structNum, NORMAL);
 	return ret;
 }
 
@@ -79,7 +79,7 @@ sgx_status_t testOpOram(){
 
 	//test of opLinearScanBlock
 	int structNum = -1;
-	ret = init_structure(7, TYPE_ORAM, &structNum);
+	ret = init_structure(7, TYPE_ORAM, &structNum, NORMAL);
 	if(ret != SGX_SUCCESS) return ret;
 	printf("passed oram init!\n");
 
@@ -137,7 +137,7 @@ sgx_status_t testOpLinScanBlock(){
 
 	//test of opLinearScanBlock
 	int structNum = -1;
-	ret = init_structure(7, TYPE_LINEAR_SCAN, &structNum);
+	ret = init_structure(7, TYPE_LINEAR_SCAN, &structNum, NORMAL);
 	if(ret != SGX_SUCCESS) return ret;
 	printf("passed opLinearScanBlock init!\n");
 
