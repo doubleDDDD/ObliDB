@@ -269,6 +269,10 @@ void ocall_write_block(
         assert(storageengine);
     }
 
+	// 需要根据structureId找到对应的表的起始page，并且确定一个能用的page，然后再调用page的insert函数
+
+
+
 	//printf("data: %d %d %d %d\n", structureId, index, blockSize, ((int*)buffer)[0]);fflush(stdout);
 	//printf("data: %d %d %d\n", structureId, index, blockSize);fflush(stdout);
 
@@ -588,8 +592,9 @@ void BDB1Linear(sgx_enclave_id_t enclave_id, int status){
 	//printTable(enclave_id, (int*)&status, "rankings");
 
 	startTime = clock();
+	// colChoice = -1 means select all col, no aggregate no groupCol
 	selectRows(enclave_id, (int*)&status, "rankings", -1, cond, -1, -1, 2, 0);
-	//char* tableName, int colChoice, Condition c, int aggregate, int groupCol, int algChoice, int key_start, int key_end
+	//char* tableName, int colChoice, Condition c, int aggregate, int groupCol, int algChoice, int intermediate
 	endTime = clock();
 	elapsedTime = (double)(endTime - startTime)/(CLOCKS_PER_SEC);
 	printf("BDB1 running time (small): %.5f\n", elapsedTime);
@@ -597,7 +602,7 @@ void BDB1Linear(sgx_enclave_id_t enclave_id, int status){
     deleteTable(enclave_id, (int*)&status, "ReturnTable");
 	startTime = clock();
 	selectRows(enclave_id, (int*)&status, "rankings", -1, cond, -1, -1, 3, 0);
-	//char* tableName, int colChoice, Condition c, int aggregate, int groupCol, int algChoice, int key_start, int key_end
+	//char* tableName, int colChoice, Condition c, int aggregate, int groupCol, int algChoice, int intermediate
 	endTime = clock();
 	elapsedTime = (double)(endTime - startTime)/(CLOCKS_PER_SEC);
 	printf("BDB1 running time (hash): %.5f\n", elapsedTime);
@@ -615,8 +620,9 @@ void BDB1Linear(sgx_enclave_id_t enclave_id, int status){
 }
 
 
-void BDB2(sgx_enclave_id_t enclave_id, int status, int baseline){
-//block size 2048
+void BDB2(sgx_enclave_id_t enclave_id, int status, int baseline)
+{
+	//block size 2048
 
 	uint8_t* row = (uint8_t*)malloc(BLOCK_DATA_SIZE);
 	int structureIdIndex = -1;
@@ -660,7 +666,6 @@ void BDB2(sgx_enclave_id_t enclave_id, int status, int baseline){
 
 	char* tableName = "uservisits";
 	createTable(enclave_id, (int*)&status, &userdataSchema, tableName, strlen(tableName), TYPE_LINEAR_SCAN, 350010, &structureIdLinear);//TODO temp really 350010
-
 
 	std::ifstream file2("uservisits.csv");
 	char line[BLOCK_DATA_SIZE];//make this big just in case

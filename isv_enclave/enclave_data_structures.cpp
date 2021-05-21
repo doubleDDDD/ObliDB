@@ -1,15 +1,17 @@
 #include "definitions.h"
 #include "isv_enclave.h"
 
+// 以下数据结构都是 sgx 的 heap 上的
 //key for reading/writing to oblivious data structures
 sgx_aes_gcm_128bit_key_t *obliv_key;
 //for keeping track of structures, should reflect the structures held by the untrusted app;
-int oblivStructureSizes[NUM_STRUCTURES] = {0}; //actual size, not logical size for orams
+int oblivStructureSizes[NUM_STRUCTURES] = {0}; // actual size, not logical size for orams
 Obliv_Type oblivStructureTypes[NUM_STRUCTURES];
 //specific to oram structures
+// sgx 中有些数据结构需要 trace 所有的 block，所以会依赖于 row num，所以 flat 存储的适合于 small table
 unsigned int* positionMaps[NUM_STRUCTURES] = {0};
 uint8_t* usedBlocks[NUM_STRUCTURES] = {0};
-int* revNum[NUM_STRUCTURES] = {0};
+int* revNum[NUM_STRUCTURES] = {0};  /* 版本号 */
 std::list<Oram_Block>* stashes[NUM_STRUCTURES];
 int stashOccs[NUM_STRUCTURES] = {0};//stash occupancy, number of elements in stash
 int logicalSizes[NUM_STRUCTURES] = {0};
@@ -95,11 +97,11 @@ int opOneLinearScanBlock(
 
 	if(write){
 		//we leak whether an op is a read or a write; we could hide it, but it may not be necessary?
-		real->actualAddr = i;
+		real->actualAddr = i;  /* which row */
 		real->revNum = revNum[structureId][i]+1;
-		revNum[structureId][i]++;
+		revNum[structureId][i]++;  /* revision numbe */
 		if(encryptBlock(realEnc, real, obliv_key, TYPE_LINEAR_SCAN)!=0) {
-			//replace encryption of real with encryption of block
+			// replace encryption of real with encryption of block
 			return 1;
 		}
 		/* out sgx to write */
@@ -146,19 +148,18 @@ int opLinearScanBlock(int structureId, int index, Linear_Scan_Block* block, int 
 	for(int i = 0; i < size; i++){
 		if(i == index){//printf("begin real\n");
 			if(write){//we leak whether an op is a read or a write; we could hide it, but it may not be necessary?
-				if(encryptBlock(realEnc, block, obliv_key, TYPE_LINEAR_SCAN)!=0) return 1; //replace encryption of real with encryption of block
+				if(encryptBlock(realEnc, block, obliv_key, TYPE_LINEAR_SCAN)!=0) {return 1;} //replace encryption of real with encryption of block
 				ocall_write_block(structureId, i, encBlockSize, realEnc, MEMORY);
 			}//printf("end real\n");
 			else{
 				ocall_read_block(structureId, i, encBlockSize, realEnc, MEMORY);//printf("here\n");
 				//printf("beginning of mac(op)? %d\n", realEnc->macTag[0]);
-				if(decryptBlock(realEnc, real, obliv_key, TYPE_LINEAR_SCAN) != 0) return 1;
+				if(decryptBlock(realEnc, real, obliv_key, TYPE_LINEAR_SCAN) != 0) {return 1;}
 			}
-
 		}
 		else{//printf("begin dummy\n");
 			if(write){
-				if(encryptBlock(dummyEnc, dummy, obliv_key, TYPE_LINEAR_SCAN)!=0) return 1;
+				if(encryptBlock(dummyEnc, dummy, obliv_key, TYPE_LINEAR_SCAN)!=0) {return 1;}
 				ocall_write_block(structureId, i, encBlockSize, dummyEnc, MEMORY);
 			}//printf("end dummy\n");
 			else{

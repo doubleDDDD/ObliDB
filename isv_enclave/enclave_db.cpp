@@ -109,7 +109,7 @@ int createTable(
 		/* rdb 有最大列数要求 */
 		return 1;
 	}
-	int rowSize = getRowSize(schema);
+	int rowSize = getRowSize(schema);  /* 一个tuple的大小 */
 	//printf("row size: %d\n", rowSize);
 	if(rowSize <= 0) {return rowSize;}
 	if(BLOCK_DATA_SIZE/rowSize == 0) {
@@ -125,14 +125,14 @@ int createTable(
 	if(type == TYPE_TREE_ORAM){
 		//this should be good assuming MAX_ORDER is big enough
 		//if max order gets too small, replace 1.1 with something bigger
-		numberOfRows = numberOfRows *1.1 -1; //need a larger memory, to store all the tree
+		numberOfRows = numberOfRows * 1.1 -1; //need a larger memory, to store all the tree
 	}
 	if(type == TYPE_TREE_ORAM || type == TYPE_ORAM) {
 		numberOfRows = nextPowerOfTwo(numberOfRows+1) - 1;
 	} //get rid of the if statement to pad all tables to next power of 2 size
 
 	numberOfRows += (numberOfRows == 0);
-	int initialSize = numberOfRows;
+	int initialSize = numberOfRows;  // 一行一个 tuple，最终到底需要多少行
 
 	// structureId 会被分配一个表号
 	retVal = init_structure(initialSize, type, structureId, tabletype);
@@ -1966,15 +1966,20 @@ extern int indexSelect(char* tableName, int colChoice, Condition c, int aggregat
 	return num_found;
 }
 
-//groupCol = -1 means not to order or group by, aggregate = -1 means no aggregate, aggregate = 0 count, 1 sum, 2 min, 3 max, 4 mean
-//including algChoice in case I need to use it later to choose among algorithms
-//select column colNum; if colChoice = -1, select all columns
+// groupCol = -1 means not to order or group by, aggregate = -1 means no aggregate, aggregate = 0 count, 1 sum, 2 min, 3 max, 4 mean
+// including algChoice in case I need to use it later to choose among algorithms
+// select column colNum; if colChoice = -1, select all columns
 int selectRows(
 	char* tableName, int colChoice, 
 	Condition c, int aggregate, int groupCol, int algChoice, int intermediate) 
 {
-	int structureId = getTableId(tableName);
-	Obliv_Type type = oblivStructureTypes[structureId];
+	/**
+	 * query algChoice == 2 means	small
+	 * query algChoice == 3 means	hash
+	 * query algChoice == 5 means	baseline
+	 */
+	int structureId = getTableId(tableName);  /* get table */
+	Obliv_Type type = oblivStructureTypes[structureId];  /* global var */
 	int colChoiceSize = BLOCK_DATA_SIZE;
 	DB_Type colChoiceType = INTEGER;
 	int colChoiceOffset = 0;
@@ -1993,7 +1998,7 @@ int selectRows(
 	uint8_t* row = (uint8_t*)malloc(BLOCK_DATA_SIZE);
 	uint8_t* row2 = (uint8_t*)malloc(BLOCK_DATA_SIZE);
 
-	char *retName = "ReturnTable";
+	char *retName = "ReturnTable";  /* ret table */
 	int retNameLen = strlen(retName);
 	int retStructId = -1;
 	Obliv_Type retType = TYPE_LINEAR_SCAN;
@@ -2001,41 +2006,58 @@ int selectRows(
 	int retNumRows = 0; //set later
 	switch(type){
 	case TYPE_LINEAR_SCAN:
-		if(groupCol == -1) {//printf("no groupby %d\n", aggregate);
-			if(aggregate == -1) {//actually doing a select
+		if(groupCol == -1) {
+			//printf("no groupby %d\n", aggregate);
+			if(aggregate == -1) {
+				//actually doing a select
 				int almostAll = 0;
 				int continuous = 0;
 				int small = 0;
 				int contTemp = 0;
 				int dummyVar = 0;
 				int baseline = 0;
+
 				//first pass to determine 1) output size (count), 2) whether output is one continuous chunk (continuous)
 				for(int i = 0; i < oblivStructureSizes[structureId]; i++){
-					opOneLinearScanBlock(structureId, i, (Linear_Scan_Block*)row, 0);
-					row = ((Linear_Scan_Block*)row)->data;
+					/** 
+					 * 这个for循环可以把表过一遍
+					 * 知道 input 表的大小以及 output table 的大小
+					 * 根据这两个值就可以选择合适的 query 算法
+					 * 尽量少的泄露信息
+					 */
+					opOneLinearScanBlock(structureId, i, (Linear_Scan_Block*)row, 0);  /* read table out of sgx */
+					row = ((Linear_Scan_Block*)row)->data;  /* 解密后的明文 */
 					//printf("ready for a comparison? %d\n", c.numClauses);
-						if(rowMatchesCondition(c, row, schemas[structureId]) && row[0] != '\0'){
-							count++;
-							if(!continuous && !contTemp){//first hit
-								continuous = 1;
-							}
-							else if(continuous && contTemp){//a noncontinuous hit
-								continuous = 0;
-							}
+
+					if(rowMatchesCondition(c, row, schemas[structureId]) && row[0] != '\0'){
+						/* hit */
+						count++;  /* hit times */
+						if(!continuous && !contTemp){
+							//first hit
+							continuous = 1;
 						}
-						else{
-							dummyVar++;
-							if(continuous && !contTemp){//end of continuous chunk
-								contTemp = 1;
-							}
+						else if(continuous && contTemp){
+							//a noncontinuous hit
+							continuous = 0;
 						}
+					}
+					else{
+						/* no hit */
+						dummyVar++;  /* miss times */
+						if(continuous && !contTemp){
+							//end of continuous chunk
+							contTemp = 1;
+						}
+					}
 				}
 
-				if(count > oblivStructureSizes[structureId]*.01*PERCENT_ALMOST_ALL && colChoice == -1){ //return almost all only if the whole row is selected (to make my life easier)
+				if(count > oblivStructureSizes[structureId]*.01*PERCENT_ALMOST_ALL && colChoice == -1){ 
+					//return almost all only if the whole row is selected (to make my life easier)
+					/* > 0.9 almost all */
 					almostAll = 1;
 				}
 				if(count < 5*ROWS_IN_ENCLAVE){
-					small = 1;
+					small = 1;  /* 命中很少 */
 					if(count < ROWS_IN_ENCLAVE && continuous == 1) continuous = 0;
 				}
 				//printf("%d %f\n",count,  oblivStructureSizes[structureId]*.01*PERCENT_ALMOST_ALL); //count and count needed for almost all
@@ -2047,11 +2069,13 @@ int selectRows(
 					almostAll = 0;
 					break;
 				case 2:
+					/* 2 means small */
 					continuous = 0;
 					small = 1;
 					almostAll = 0;
 					break;
 				case 3:
+					/* hash */
 					continuous = 0;
 					small = 0;
 					almostAll = 0;
@@ -2062,6 +2086,7 @@ int selectRows(
 					almostAll = 1;
 					break;
 				case 5:
+					/* base line */
 					baseline = 1;
 					continuous = 0;
 					small = 0;
@@ -2076,10 +2101,12 @@ int selectRows(
 				else if(small || continuous || baseline){
 					retNumRows = count;
 				}
-				else{//hash
-					retNumRows = 5*count;
+				else{
+					retNumRows = 5*count; //hash
 				}
-				if(colChoice != -1){ //include selected col only
+				if(colChoice != -1){ 
+					// include selected col only
+					// if colChoice == 1 means all
 					retSchema.numFields = 2;
 					retSchema.fieldOffsets[0] = 0;
 					retSchema.fieldOffsets[1] = 1;
@@ -2088,13 +2115,17 @@ int selectRows(
 					retSchema.fieldTypes[0] = CHAR;
 					retSchema.fieldTypes[1] = colChoiceType;
 				}
-				else{ //include whole selected row
+				else{
+					//include whole selected row
 					retSchema = schemas[structureId];
 				}
 				if(intermediate) retNumRows = oblivStructureSizes[structureId];
 				if(PADDING) retNumRows = PADDING;
 				//printf("%d %d %d %d %s %d %d\n", retNameLen, retNumRows, retStructId, retType, retName, retSchema.numFields, retSchema.fieldSizes[1]);
+
+				// 离开可信区去创建新表，仅在内存中创建
 				int out = createTable(&retSchema, retName, retNameLen, retType, retNumRows, &retStructId);
+
 				//printf("%d |\n", retNumRows);
 				//printf("%d %d %d %d %s %d %d\n", retNameLen, retNumRows, retStructId, retType, retName, retSchema.numFields, retSchema.fieldSizes[1]);
 				//printf("%s\n", tableNames[retStructId]);
@@ -2108,10 +2139,17 @@ int selectRows(
 				//printf("Made it to algorithm slection\n");
 				//pick algorithm
 				if(baseline){
+					// Naive in article
 					printf("BASELINE\n");
+					// 分配一个 oram block 的大小
 					Oram_Block* oBlock = (Oram_Block*)malloc(getBlockSize(TYPE_ORAM));
 					int oramTableId = -1;
 					char* oramName = "tempOram";
+					/**
+					 * create oram out table, create table in memory
+					 * 占用一个表号，申请内存，全部用垃圾数据写一遍先
+					 * 最后表编号返回 oramTableId
+					 */
 					createTable(&retSchema, oramName, strlen(oramName), TYPE_ORAM, retNumRows, &oramTableId);
 					memset(oBlock, 0, sizeof(Oram_Block));
 					opOramBlock(oramTableId, 0, oBlock, 1);
@@ -2128,12 +2166,12 @@ int selectRows(
 						oBlock->actualAddr = oramRows;
 						if(match){
 							usedBlocks[oramTableId][oramRows]=1;
-							opOramBlock(oramTableId, oramRows, oBlock, 1);
+							opOramBlock(oramTableId, oramRows, oBlock, 1);  // write
 							oramRows++;
 						}
 						else{
 							dummyVar=1;
-							opOramBlock(oramTableId, 0, oBlock, 0);
+							opOramBlock(oramTableId, 0, oBlock, 0);  // dummy read
 							dummyVar++;
 						}
 					}
@@ -2145,7 +2183,8 @@ int selectRows(
 					}
 					free(oBlock);
 				}
-				else if(continuous){//use continuous chunk algorithm
+				else if(continuous){
+					//use continuous chunk algorithm
 					printf("CONTINUOUS\n");
 					int rowi = -1, dummyVar = 0;//NOTE: rowi left in for historical reasons; it should be replaced by i
 					for(int i = 0; i < oblivStructureSizes[structureId]; i++){
@@ -2175,7 +2214,8 @@ int selectRows(
 					}
 					//printTable("ReturnTable");
 				}
-				else{//pick one of other algorithms
+				else{
+					//pick one of other algorithms
 					if(almostAll){
 						printf("ALMOST ALL\n");
 						//"almost all" solution, it's a field being returned that is not an integer so we can put in dummy entries

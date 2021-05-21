@@ -628,19 +628,109 @@ private:
  * | HEADER | ... FREE SPACES ... | TUPLES |
  *  ---------------------------------------
  *                                 ^
- *                         free space pointer
+ *                         free space pointer 从后向前的
  *
  *  Header format (size in byte):
  *  --------------------------------------------------------------------------
- * | PageId (4)| LSN (4)| PrevPageId (4)| NextPageId (4)| FreeSpacePointer(4) |
+ * | PageId (4)| LSN (4, 保留)| PrevPageId (4)| NextPageId (4)| FreeSpacePointer(4) |
  *  --------------------------------------------------------------------------
  *  --------------------------------------------------------------
  * | TupleCount (4) | Tuple_1 offset (4) | Tuple_1 size (4) | ... |
  *  --------------------------------------------------------------
- *
+ * 在一个page中，tuple slot 从前向后增长，空闲空间从后先前增长。FreeSpacePointer 在初始化的时候是指向 page 的尾端的
+ * 一个 tuple 的 slot 占 8 个字节
+ * size=0 意味着是一个 empty slot
+ * 如果是线性扫描的 page 的话，没有必要这样复杂
+ * 因为一个 table 的里表都是等长的，page header 记录一下它有多长，起始index是多少，有几个就足够了
  */
 class TuplePage : public Page {
-    ;
+public:
+    /**
+    * Header related
+    */
+    void Init(page_id_t page_id, size_t page_size, page_id_t prev_page_id){
+        /* 按照上面的结构从前向后set */
+        memcpy(GetData(), &page_id, 4);  /* set page id */
+        SetPrevPageId(prev_page_id);
+        SetNextPageId(INVALID_PAGE_ID);
+        SetFreeSpacePointer(page_size);
+        SetTupleCount(0);
+    }
+
+    page_id_t GetPageId(){
+        return *reinterpret_cast<page_id_t *>(GetData());
+    }
+
+    page_id_t GetPrevPageId(){
+        return *reinterpret_cast<page_id_t *>(GetData() + 8);
+    }
+
+    page_id_t GetNextPageId(){
+        return *reinterpret_cast<page_id_t *>(GetData() + 12);
+    }
+
+    void SetPrevPageId(page_id_t prev_page_id){
+        memcpy(GetData() + 8, &prev_page_id, 4);
+    }
+
+    void SetNextPageId(page_id_t next_page_id){
+        memcpy(GetData() + 12, &next_page_id, 4);
+    }
+
+    /**
+    * Tuple related
+    */
+    bool InsertTuple(int index, int blockSize, void *buffer){
+        // check if free space is enough
+        if(blockSize > GetFreeSpaceSize()){
+            return false
+        }
+    }
+
+private:
+    /**
+    * helper functions
+    */
+    int32_t GetTupleOffset(int slot_num){
+        return *reinterpret_cast<int32_t *>(GetData()  + 24 + slot_num * 8);
+    }
+
+    int32_t GetTupleSize(int slot_num){
+        return *reinterpret_cast<int32_t *>(GetData()  + 24 + slot_num * 8 + 4);
+    }
+
+    void SetTupleOffset(int slot_num, int32_t offset){
+        char *begin = GetData()  + 24 + slot_num * 8;
+        memcpy(begin, &offset, 4);
+    }
+
+    void SetTupleSize(int slot_num, int32_t offset){
+        char *begin = GetData()  + 24 + slot_num * 8 + 4;
+        memcpy(begin, &offset, 4);
+    }
+
+    int32_t GetFreeSpacePointer(){
+        // offset of the beginning of free space
+        return *reinterpret_cast<int32_t *>(GetData()  + 16);
+    }
+
+    void SetFreeSpacePointer(int32_t free_space_pointer){
+        memcpy((GetData() + 16), &free_space_pointer, 4);
+    }
+
+    int32_t GetTupleCount(){
+        // Note that this tuple count may be larger than # of
+        return *reinterpret_cast<int32_t *>(GetData()  + 20);
+    };
+
+    // actual tuples because some slots may be empty
+    void SetTupleCount(int32_t tuple_count){
+        memcpy((GetData() + 20), &tuple_count, 4);
+    }
+
+    int32_t GetFreeSpaceSize(){
+        return GetFreeSpacePointer() - (24 + 8 * GetTupleCount());
+    }
 }
 
 /* 磁盘管理 */
