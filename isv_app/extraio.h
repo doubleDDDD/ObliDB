@@ -47,6 +47,8 @@ class DiskManager;
 class BufferPoolManager;
 class StorageEngine;
 
+class TablePage;
+
 static char *buffer_used = nullptr;
 
 /**
@@ -522,8 +524,13 @@ private:
  * 32 bytes, max is 31 bytes) and their corresponding root_id
  *
  * Format (size in byte):
+ * 增加一些table的元数据，在本例中
+ *      加密块大小
+ *      table 的 tuple数量
+ *      类型
+ * 都需要持久化记录
  *  -----------------------------------------------------------------
- * | RecordCount (4) | Entry_1 name (32) | Entry_1 root_id (4) | ... |
+ * | RecordCount (4) | Entry_1 name (32) | Entry_1 root_id (4) | Entry_1 EncBlockSize (4) | Entry_1 row_num (4) | Entry_1 type(4) |... |
  *  -----------------------------------------------------------------
  */
 class HeaderPage : public Page {
@@ -531,7 +538,14 @@ public:
     void Init() { SetRecordCount(0); }
 
     /* Record related */
-    bool InsertRecord(const std::string &name, const page_id_t root_id){
+    bool InsertRecord(
+        const std::string &name, 
+        const page_id_t root_id,
+        int encBlockSize,
+        int rownum,
+        int type
+    )
+    {
         assert(name.length() < 32);
         assert(root_id > INVALID_PAGE_ID);
 
@@ -539,45 +553,51 @@ public:
         int offset = 4 + rnum * 36;
 
         /* check if offset is too large */
-        if (PAGE_SIZE - offset < 36) { return false; }
+        if (PAGE_SIZE - offset < 36) { 
+            return false; 
+        }
 
         /* 检查重名 */
-        if (FindRecord(name) != -1)
+        if (FindRecord(name) != -1){
             return false;
+        }
 
         // copy record content
         memcpy(GetData() + offset, name.c_str(), (name.length() + 1));
         memcpy((GetData() + offset + 32), &root_id, 4);
+        memcpy((GetData() + offset + 36), &encBlockSize, 4);
+        memcpy((GetData() + offset + 40), &rownum, 4);
+        memcpy((GetData() + offset + 44), &type, 4);
 
         SetRecordCount(rnum + 1);
         return true;
     }
 
-    bool DeleteRecord(const std::string &name){
-        int rnum = GetRecordCount();
-        assert(rnum > 0);
+    // bool DeleteRecord(const std::string &name){
+    //     int rnum = GetRecordCount();
+    //     assert(rnum > 0);
 
-        int index = FindRecord(name);
-        if(index == -1) {return false;}
+    //     int index = FindRecord(name);
+    //     if(index == -1) {return false;}
 
-        int offset = 4 + index * 36;
-        /* 整体前移 */
-        memmove(GetData() + offset, GetData() + offset + 36, (rnum - index - 1) * 36);
-        SetRecordCount(rnum - 1);
-        return true;
-    };
+    //     int offset = 4 + index * 36;
+    //     /* 整体前移 */
+    //     memmove(GetData() + offset, GetData() + offset + 36, (rnum - index - 1) * 36);
+    //     SetRecordCount(rnum - 1);
+    //     return true;
+    // };
 
-    bool UpdateRecord(const std::string &name, const page_id_t root_id){
-        assert(name.length() < 32);
+    // bool UpdateRecord(const std::string &name, const page_id_t root_id){
+    //     assert(name.length() < 32);
 
-        int index = FindRecord(name);
-        if(index == -1) {return false;}
+    //     int index = FindRecord(name);
+    //     if(index == -1) {return false;}
 
-        int offset = 4 + index * 36;
-        memcpy((GetData() + offset + 32), &root_id, 4);
+    //     int offset = 4 + index * 36;
+    //     memcpy((GetData() + offset + 32), &root_id, 4);
 
-        return true;
-    }
+    //     return true;
+    // }
 
     // return root_id if success
     bool GetRootId(const std::string &name, page_id_t &root_id) {
@@ -595,7 +615,6 @@ public:
         root_id = *reinterpret_cast<page_id_t *>(GetData() + offset);
     }
 
-private:
     /* helper functions */
     int GetRecordCount(){
         /* GetData的前4个字节，直接 char* 转 int，int 4字节 */
@@ -613,13 +632,57 @@ private:
 
         return -1;
     }
-
+private:
     void SetRecordCount(int record_count){
         memcpy(GetData(), &record_count, 4);
     }
 };
 
 /**
+ * 封装一下 tuple, 实际上是完整的加密后的块
+ */
+class Tuple{
+public:
+    Tuple()=default;
+
+    Tuple(int32_t _size, char* buffer):size(_size) {
+        data = new char[size];
+        memcpy((void *)data, (void *)buffer, size);
+    }
+
+    ~Tuple(){
+        if(data){
+            delete[] data;
+            data = nullptr;
+        }
+    }
+
+    void SetData(char* buffer, int32_t _size){
+        data = new char[_size];
+        size = _size;
+        memcpy(data, buffer, size);
+    }
+
+    char* GetData() const { return data; }
+    int32_t GetSize() const { return size; }
+
+private:
+    int32_t size;
+    char* data;
+};
+
+
+#define PAGE_OFFSET  0
+#define PREPAGE_OFFSET  12 
+#define NEXTPAGE_OFFSET 20
+#define FREE_POINTER_OFFSET 28
+#define TUPLECOUNT_OFFSET 32
+#define TUPLE_META_LEN 12
+#define PAGE_ID_LEN 8
+#define TUPLE_SLOT_OFFSET 36
+
+/**
+ * 字段修改为 8 位 in oblidb, 其实主要是 pageid 需要占 8 位
  * tuple page
  * header + slot
  *
@@ -632,58 +695,131 @@ private:
  *
  *  Header format (size in byte):
  *  --------------------------------------------------------------------------
- * | PageId (4)| LSN (4, 保留)| PrevPageId (4)| NextPageId (4)| FreeSpacePointer(4) |
+ * | PageId (8)| LSN (4, 保留)| PrevPageId (8)| NextPageId (8)| FreeSpacePointer(4) |
  *  --------------------------------------------------------------------------
  *  --------------------------------------------------------------
- * | TupleCount (4) | Tuple_1 offset (4) | Tuple_1 size (4) | ... |
+ * | TupleCount (4) | Tuple_1 offset (4) | Tuple_1 size (4) | Tuple_1 index (4) | ... |
  *  --------------------------------------------------------------
- * 在一个page中，tuple slot 从前向后增长，空闲空间从后先前增长。FreeSpacePointer 在初始化的时候是指向 page 的尾端的
+ * 在一个 page 中，tuple slot 从前向后增长，空闲空间从后向前增长。FreeSpacePointer 在初始化的时候是指向 page 的尾端的
  * 一个 tuple 的 slot 占 8 个字节
  * size=0 意味着是一个 empty slot
  * 如果是线性扫描的 page 的话，没有必要这样复杂
  * 因为一个 table 的里表都是等长的，page header 记录一下它有多长，起始index是多少，有几个就足够了
  */
-class TuplePage : public Page {
+class TablePage : public Page {
 public:
-    /**
-    * Header related
-    */
-    void Init(page_id_t page_id, size_t page_size, page_id_t prev_page_id){
+    /** 
+     * 类内初始化，先于构造函数执行，会被构造函数覆盖
+     * 构造函数无需再初始化它们了
+     */
+    /* Header related */
+    void Init(page_id_t page_id, size_t page_size, page_id_t prev_page_id)
+    {
         /* 按照上面的结构从前向后set */
-        memcpy(GetData(), &page_id, 4);  /* set page id */
+        memcpy(GetData(), &page_id, 8);  /* set page id */
         SetPrevPageId(prev_page_id);
         SetNextPageId(INVALID_PAGE_ID);
         SetFreeSpacePointer(page_size);
         SetTupleCount(0);
     }
 
-    page_id_t GetPageId(){
-        return *reinterpret_cast<page_id_t *>(GetData());
+    page_id_t GetPageId() {
+        return *reinterpret_cast<page_id_t *>(GetData()); 
     }
 
-    page_id_t GetPrevPageId(){
-        return *reinterpret_cast<page_id_t *>(GetData() + 8);
+    page_id_t GetPrevPageId() { 
+        return *reinterpret_cast<page_id_t *>(GetData() + PREPAGE_OFFSET); 
     }
 
-    page_id_t GetNextPageId(){
-        return *reinterpret_cast<page_id_t *>(GetData() + 12);
+    page_id_t GetNextPageId() { 
+        return *reinterpret_cast<page_id_t *>(GetData() + NEXTPAGE_OFFSET); 
     }
 
-    void SetPrevPageId(page_id_t prev_page_id){
-        memcpy(GetData() + 8, &prev_page_id, 4);
+    void SetPrevPageId(page_id_t prev_page_id) { 
+        memcpy(GetData() + PREPAGE_OFFSET, &prev_page_id, PAGE_ID_LEN); 
     }
 
-    void SetNextPageId(page_id_t next_page_id){
-        memcpy(GetData() + 12, &next_page_id, 4);
+    void SetNextPageId(page_id_t next_page_id) {
+        memcpy(GetData() + NEXTPAGE_OFFSET, &next_page_id, PAGE_ID_LEN); 
     }
 
     /**
     * Tuple related
     */
-    bool InsertTuple(int index, int blockSize, void *buffer){
+    bool InsertTuple(const Tuple &tuple, int index)
+    {
+        int dataSize = tuple.GetSize();
         // check if free space is enough
-        if(blockSize > GetFreeSpaceSize()){
-            return false
+        if(dataSize > GetFreeSpaceSize()){
+            return false;
+        }
+
+        // try to reuse a free slot first
+        int i;
+        for(i=0;i<GetTupleCount();++i){
+            if(GetTupleSize(i)==0){break;}  // empty
+        }
+
+        // no free slot left, 没有空闲 slot，需要追加一个 slot 以及 数据本身
+        // 一个 tuple 的元数据是 Tuple_1 offset (4), Tuple_1 size (4) 共计 8 字节
+        if (i == GetTupleCount() && GetFreeSpaceSize() < tuple.GetSize() + TUPLE_META_LEN) {
+            return false; // not enough space
+        }
+
+        // update free space pointer first
+        SetFreeSpacePointer(GetFreeSpacePointer() - tuple.GetSize());
+        // actually insert
+        memcpy(GetData() + GetFreeSpacePointer(), tuple.GetData(), tuple.GetSize());
+        // set metadata of tuple
+        SetTupleOffset(i, GetFreeSpacePointer());
+        SetTupleSize(i, tuple.GetSize());
+        SetTupleIndex(i, index);
+
+        if (i == GetTupleCount()) {
+            // append a new slot and new data
+            SetTupleCount(GetTupleCount() + 1);
+        }
+
+        return true;
+    }
+
+    /**
+     * update tuple
+     */
+    bool UpdateTuple(const Tuple &tuple, int index)
+    {
+        int lastindex, firstindex, slotnr;
+
+        lastindex = GetLastTupleIndex();
+        if (index > lastindex) {
+            return false;
+        } else {
+            firstindex = GetFirstTupleIndex();
+            slotnr = index - firstindex;
+            // printf("%d,%d,%d,%d\n", index, tuple.GetSize(), GetTupleSize(slotnr), slotnr);
+            assert(tuple.GetSize() == GetTupleSize(slotnr));
+            // just update is ok
+            memcpy(GetData()+GetTupleOffset(slotnr), tuple.GetData(), tuple.GetSize());
+            return true;
+        }
+    }
+
+    bool GetTuple(Tuple &tuple, int index)
+    {
+        int lastindex, firstindex, slotnr;
+        int tuplesize;
+        int tupleoffset;
+        lastindex = GetLastTupleIndex();
+
+        if (index > lastindex) {
+            return false;
+        } else {
+            firstindex = GetFirstTupleIndex();
+            slotnr = index - firstindex;
+            tuplesize = GetTupleSize(slotnr);
+            tupleoffset = GetTupleOffset(slotnr);
+            tuple.SetData((GetData()+tupleoffset), tuplesize);
+            return true;
         }
     }
 
@@ -691,46 +827,80 @@ private:
     /**
     * helper functions
     */
-    int32_t GetTupleOffset(int slot_num){
-        return *reinterpret_cast<int32_t *>(GetData()  + 24 + slot_num * 8);
+    int32_t GetTupleOffset(int slot_num) { 
+        return *reinterpret_cast<int32_t *>(GetData()  + TUPLE_SLOT_OFFSET + slot_num * TUPLE_META_LEN); 
     }
 
-    int32_t GetTupleSize(int slot_num){
-        return *reinterpret_cast<int32_t *>(GetData()  + 24 + slot_num * 8 + 4);
+    int32_t GetTupleSize(int slot_num) { 
+        return *reinterpret_cast<int32_t *>(GetData()  + TUPLE_SLOT_OFFSET + slot_num * TUPLE_META_LEN + 4); 
     }
 
-    void SetTupleOffset(int slot_num, int32_t offset){
-        char *begin = GetData()  + 24 + slot_num * 8;
-        memcpy(begin, &offset, 4);
+    int32_t GetTupleIndex(int slot_num) { 
+        return *reinterpret_cast<int32_t *>(GetData()  + TUPLE_SLOT_OFFSET + slot_num * TUPLE_META_LEN + 8); 
     }
 
-    void SetTupleSize(int slot_num, int32_t offset){
-        char *begin = GetData()  + 24 + slot_num * 8 + 4;
-        memcpy(begin, &offset, 4);
+    int32_t GetFirstTupleIndex() { return GetTupleIndex(0); }  /* 第一个 slot 中 tuple 对应的 index */
+
+    int32_t GetLastTupleIndex(){
+        int firstindex = GetFirstTupleIndex();
+        int tuplecnt = GetTupleCount();
+        return firstindex + tuplecnt - 1;
     }
 
-    int32_t GetFreeSpacePointer(){
-        // offset of the beginning of free space
-        return *reinterpret_cast<int32_t *>(GetData()  + 16);
+    void SetTupleOffset(int slot_num, int32_t offset) { 
+        memcpy(GetData() + TUPLE_SLOT_OFFSET + slot_num * TUPLE_META_LEN, &offset, 4); 
     }
 
-    void SetFreeSpacePointer(int32_t free_space_pointer){
-        memcpy((GetData() + 16), &free_space_pointer, 4);
+    void SetTupleSize(int slot_num, int32_t size) { 
+        memcpy(GetData() + TUPLE_SLOT_OFFSET + slot_num * TUPLE_META_LEN + 4, &size, 4); 
     }
 
-    int32_t GetTupleCount(){
-        // Note that this tuple count may be larger than # of
-        return *reinterpret_cast<int32_t *>(GetData()  + 20);
-    };
+    void SetTupleIndex(int slot_num, int32_t index) { 
+        memcpy(GetData() + TUPLE_SLOT_OFFSET + slot_num * TUPLE_META_LEN + 8, &index, 4); 
+    }
+
+    // offset of the beginning of free space
+    int32_t GetFreeSpacePointer() { 
+        return *reinterpret_cast<int32_t *>(GetData()  + FREE_POINTER_OFFSET); 
+    }
+
+    void SetFreeSpacePointer(int32_t free_space_pointer) { 
+        memcpy((GetData() + FREE_POINTER_OFFSET), &free_space_pointer, 4); 
+    }
+
+    // Note that this tuple count may be larger than # of
+    int32_t GetTupleCount() { 
+        return *reinterpret_cast<int32_t *>(GetData()  + TUPLECOUNT_OFFSET); 
+    }
 
     // actual tuples because some slots may be empty
-    void SetTupleCount(int32_t tuple_count){
-        memcpy((GetData() + 20), &tuple_count, 4);
+    void SetTupleCount(int32_t tuple_count) { 
+        memcpy((GetData() + TUPLECOUNT_OFFSET), &tuple_count, 4); 
     }
 
-    int32_t GetFreeSpaceSize(){
-        return GetFreeSpacePointer() - (24 + 8 * GetTupleCount());
+    int32_t GetFreeSpaceSize() { 
+        return GetFreeSpacePointer() - (TUPLE_SLOT_OFFSET + TUPLE_META_LEN * GetTupleCount()); 
     }
+
+    friend void CheckTablePage(TablePage *);
+};
+
+inline void
+CheckTablePage(TablePage *page)
+{
+    std::cout 
+        << "Page id: " << page->GetPageId() << std::endl;
+    std::cout 
+        << "Prev id: " << page->GetPrevPageId() << std::endl;
+    std::cout 
+        << "Next id: " << page->GetNextPageId() << std::endl;
+    std::cout 
+        << "Free space pointer: " << page->GetFreeSpacePointer() << std::endl;
+    std::cout 
+        << "Tuple count: " << page->GetTupleCount() << std::endl;
+    std::cout 
+        << "Free space size: " << page->GetFreeSpaceSize() << std::endl;
+    return;
 }
 
 /* 磁盘管理 */
@@ -1007,5 +1177,458 @@ public:
     BufferPoolManager *buffer_pool_manager_;
 };
 
+/**
+ * 采用最简单的文件组织方式，tuple head
+ * 每一张表由一个 tuple head 表示
+ */
+class TableHeap {
+public:
+    TableHeap() = default;
+    // create table heap
+    TableHeap(
+        BufferPoolManager *_buffer_pool_manager): buffer_pool_manager(_buffer_pool_manager)
+    {
+        /**
+         * 构造函数，磁盘管理器会为table分配page，NewPage将以引用的形式接收 first_page_id
+         * new page should be reset 
+         */
+        auto first_page =
+            static_cast<TablePage *>(buffer_pool_manager->NewPage(first_page_id));
+        assert(first_page != nullptr);
+
+        first_page->WLatch();
+        // init page layout
+        first_page->Init(first_page_id, PAGE_SIZE, INVALID_PAGE_ID);
+        /* debug 跑一个测试, 检查一下 init 之后的状态 */
+        // CheckTablePage(first_page);
+        first_page->WUnlatch();
+        /* 2th para means if dirty */
+        buffer_pool_manager->UnpinPage(first_page_id, true);
+    }
+
+    TableHeap(
+        BufferPoolManager *_buffer_pool_manager, page_id_t _first_page_id): 
+        buffer_pool_manager(_buffer_pool_manager), first_page_id(_first_page_id)
+    {
+        auto first_page =
+            static_cast<TablePage *>(buffer_pool_manager->FetchPage(first_page_id));
+        assert(first_page != nullptr);
+    }
+
+    ~TableHeap() {}
+
+    bool InsertTuple(const Tuple &tuple, int index)
+    {
+        // for insert, if tuple is too large (>~page_size), return false
+        // 队首的元数据占32字节
+        if(tuple.GetSize() + 32 > PAGE_SIZE){
+            printf("InsertTuple: one tuple is too large!\n", tuple.GetSize() + 32);
+            return false;
+        }
+
+        /* 获取table对应的第一个page */
+        auto cur_page = static_cast<TablePage *>(buffer_pool_manager->FetchPage(first_page_id));
+        if (cur_page == nullptr) {
+            printf("InsertTuple: no page to get!\n");
+            return false;
+        }
+
+        cur_page->WLatch();
+        while (!cur_page->InsertTuple(tuple, index)) {
+            /**
+             * fail to insert due to not enough space
+             * 这个索引是线性扫过去的
+             */
+            page_id_t next_page_id = cur_page->GetNextPageId();
+            if (INVALID_PAGE_ID == next_page_id) {
+                // create new page
+                auto new_page =
+                    static_cast<TablePage *>(buffer_pool_manager->NewPage(next_page_id));
+                if (new_page == nullptr) {
+                    cur_page->WUnlatch();
+                    buffer_pool_manager->UnpinPage(cur_page->GetPageId(), false);
+                    return false;
+                }
+                new_page->WLatch();
+                // std::cout << "new table page " << next_page_id << " created" << std::endl;
+                /* 利用list将page都连接起来 */
+                cur_page->SetNextPageId(next_page_id);
+                new_page->Init(next_page_id, PAGE_SIZE, cur_page->GetPageId());
+                cur_page->WUnlatch();
+                buffer_pool_manager->UnpinPage(cur_page->GetPageId(), true);
+                cur_page = new_page;
+            } else { 
+                // valid next page
+                // 目前的实验环境下这里不会跑到
+                cur_page->WUnlatch();
+                buffer_pool_manager->UnpinPage(cur_page->GetPageId(), false);
+                /* 换一个 page */
+                cur_page = static_cast<TablePage *>(
+                    buffer_pool_manager->FetchPage(next_page_id));
+                cur_page->WLatch();
+            }
+        }
+
+        cur_page->WUnlatch();
+        buffer_pool_manager->UnpinPage(cur_page->GetPageId(), true);
+        return true;
+    }
+
+    /**
+     * table heap 代表一个 table, 这个对象负责整个表的组织方式
+     */
+    bool UpdateTuple(const Tuple &tuple, int index)
+    {
+        /* 遍历 table 的 page，找到对应的 page 先 */
+        auto cur_page = static_cast<TablePage *>(buffer_pool_manager->FetchPage(first_page_id));
+
+        cur_page->WLatch();
+        while(!cur_page->UpdateTuple(tuple, index))
+        {
+            // get next page id
+            page_id_t next_page_id = cur_page->GetNextPageId();
+            if(next_page_id == INVALID_PAGE_ID){
+                return false;
+            } else {
+                cur_page->WUnlatch();
+                buffer_pool_manager->UnpinPage(cur_page->GetPageId(), false);
+                cur_page = static_cast<TablePage *>(
+                    buffer_pool_manager->FetchPage(next_page_id));
+                cur_page->WLatch();  /* 继续执 while 循环 */
+            }
+        }
+
+        buffer_pool_manager->UnpinPage(cur_page->GetPageId(), true);
+        cur_page->WUnlatch();
+        return true;
+    }
+
+    bool GetTuple(Tuple &tuple, int index)
+    {
+        auto cur_page = \
+            static_cast<TablePage *>(buffer_pool_manager->FetchPage(first_page_id));
+
+        cur_page->WLatch();
+        while(!cur_page->GetTuple(tuple, index))
+        {
+            page_id_t next_page_id = cur_page->GetNextPageId();
+            if(next_page_id == INVALID_PAGE_ID){
+                return false;
+            } else {
+                cur_page->WUnlatch();
+                buffer_pool_manager->UnpinPage(cur_page->GetPageId(), false);
+                cur_page = static_cast<TablePage *>(
+                    buffer_pool_manager->FetchPage(next_page_id));
+                cur_page->WLatch();
+            }
+        }
+
+        buffer_pool_manager->UnpinPage(cur_page->GetPageId(), true);
+        cur_page->WUnlatch();
+        return true;
+    }
+
+    inline page_id_t GetFirstPageId() const { return first_page_id; }
+
+private:
+    BufferPoolManager *buffer_pool_manager;
+    page_id_t first_page_id;
+    friend void CheckTablePage(TablePage *);
+};
+
+
+/**
+ * 正好整合一下那几个属性
+ * 操作基本上都全部整合到了 table_heap 上
+ */
+class DBTable
+{
+public:
+    DBTable()=default;
+
+    DBTable(
+        BufferPoolManager* _buffer_pool_manager, 
+        DiskManager* _disk_manager, 
+        int _encBlockSize, int _rownum, int _type, int _cursor):
+        buffer_pool_manager(_buffer_pool_manager), disk_manager(_disk_manager), 
+        encBlockSize(_encBlockSize), rownum(_rownum), type(_type), cursor(_cursor)
+    {
+        table_heap = new TableHeap(buffer_pool_manager);
+    }
+
+    DBTable(
+        BufferPoolManager* _buffer_pool_manager, 
+        DiskManager* _disk_manager, 
+        int _encBlockSize, int _rownum, int _type, int _cursor, page_id_t first_page_id):
+        buffer_pool_manager(_buffer_pool_manager), disk_manager(_disk_manager), 
+        encBlockSize(_encBlockSize), rownum(_rownum), type(_type), cursor(_cursor)
+    {
+        assert(cursor==rownum);
+        table_heap = new TableHeap(buffer_pool_manager, first_page_id);
+    }
+
+    ~DBTable() { delete table_heap; }
+
+    bool InsertTuple(const Tuple &tuple, int index) { 
+        return table_heap->InsertTuple(tuple, index); 
+    }
+
+    bool UpdateTuple(const Tuple &tuple, int index) { 
+        return table_heap->UpdateTuple(tuple, index); 
+    }
+
+    bool GetTuple(Tuple& tuple, int index){
+        return table_heap->GetTuple(tuple, index);
+    }
+
+    int TableSize() const { return rownum; }
+    int Cursor() const { return cursor; }
+    void IncrementCursor() { cursor++; }
+
+private:
+    std::string tablename;
+    BufferPoolManager* buffer_pool_manager;
+    DiskManager* disk_manager;
+    int encBlockSize;
+    int rownum;
+    int type;
+    TableHeap *table_heap;  /* table head 几乎是最简单的数据库文件组织方式 */
+
+    /* 代表目前准备写位置的下标，每张表只写一次，游标就用一次，init一次，为 real write 准备 */
+    int cursor;  
+};
 /***********************/
 } // namespace oblidbextraio
+
+
+namespace utility{
+void split(const std::string& str, 
+           std::vector<std::string>& tokens, 
+           const char delim=' ') 
+{
+    tokens.clear();
+    
+    std::istringstream iss(str);
+    std::string tmp;
+    while (std::getline(iss, tmp, delim)) {
+        if (tmp != "") {
+            // 如果两个分隔符相邻，则 tmp == ""，忽略。
+            tokens.emplace_back(std::move(tmp));
+        }
+    }
+}
+}  // namespace utility
+
+
+namespace attacker {
+
+typedef ssize_t Tsize;  /* size of 输入表 */
+typedef ssize_t Rsize;  /* size of 结果表 */
+
+typedef struct CURSOR{
+    int whichloop;
+    int begin;
+} cursor;
+
+/**
+ * 还没有太想好基类中放什么内容
+ */
+// template <class T>
+class Attacker
+{
+public:
+    Attacker(){};
+    virtual ~Attacker(){};
+};
+
+/**
+ * select * from orderd where seq between 20 and 45
+ * low value: 20
+ * high value: 45
+ */
+// template <class T>
+
+class OblidbContinueAttack : public Attacker
+{
+public:
+    OblidbContinueAttack(
+        ssize_t _blocksize, Tsize _insize, 
+        Rsize _outsize, uint8_t* _ttable, 
+        uint8_t* _rtable, uint64_t _range_low, uint64_t _range_high):
+        blocksize(_blocksize), insize(_insize), outsize(_outsize), 
+        ttable(_ttable), rtable(_rtable), range_low(_range_low), range_high(_range_high)
+    {
+        // 暂存调序后的输入表
+        tmpttable = (uint8_t*)malloc(blocksize * insize);
+        // 暂存调蓄后的结果表
+        tmprtable = (uint8_t*)malloc(blocksize * outsize);
+
+        // 步长的初始值与结果表大小一致
+        step = outsize;
+    }
+    ~OblidbContinueAttack(){
+        free(tmpttable);
+        free(tmprtable);
+    }
+
+    void ReorderTable(int begin){
+        void* src;
+        void* dst;
+        int end = (begin + step) % insize;  // 被选出来的下标，end不是采样下标
+
+        if(begin > end){ // 闭环了
+            for(int index=0;index<insize;++index){
+                src = reinterpret_cast<void *>((ttable + index*blocksize));
+
+                if(index < end){ // 采样数据, 在table的最末端
+                    dst = reinterpret_cast<void *>((tmpttable + (insize-end+index)*blocksize));
+                } else if (index>=end && index<begin){ // 整体前移的数据
+                    dst = reinterpret_cast<void *>((tmpttable + (index-end)*blocksize));
+                } else { // 采样数据
+                    dst = reinterpret_cast<void *>((tmpttable + (index-end)*blocksize));
+                }
+
+                memcpy(dst, src, blocksize);
+            }
+        } else { // normal
+            for(int index=0;index<insize;++index){
+                src = reinterpret_cast<void *>((ttable + index*blocksize));
+
+                if(index < begin){
+                    dst = reinterpret_cast<void *>((tmpttable + index*blocksize));
+                } else if (index >= begin && index < end){
+                    dst = reinterpret_cast<void *>((tmpttable + (insize-step+index-begin)*blocksize));
+                } else {
+                    dst = reinterpret_cast<void *>((tmpttable + (index-step)*blocksize));
+                }
+
+                memcpy(dst, src, blocksize);
+            }
+        }
+    }
+
+    int SelectRows(){
+        char line[blocksize];
+        int begin;
+        const char delim = ',';
+        std::vector<std::string> tokens;
+        uint64_t num;
+
+        for(int i=0;i<insize;++i){
+            memcpy((void *)line, (void *)(tmpttable + i*blocksize), blocksize);
+            // std::cout << i << ":" << line << std::endl;
+            // 判断目标的value是否是范围查询的起始位置
+            std::string str(line);
+            utility::split(str, tokens, delim);
+            // printf("after split\n");
+            // for(auto i=tokens.begin(); i!=tokens.end();++i){
+            //     std::cout << *i << std::endl;
+            // }
+            // printf("after print tokens\n");
+            num = atoi(tokens[2].c_str());
+            if(num == range_low){
+                begin = i;
+                break;
+            }
+        }
+
+        void *dst;
+        void *src;
+
+        for(int j=begin;j<begin+outsize;++j){
+            // printf("j-begin is: %d  j%T is %d\n", j-begin, j%T);
+            dst = reinterpret_cast<void *>((tmprtable + (j-begin)*blocksize));
+            src = reinterpret_cast<void *>((tmpttable + (j%insize)*blocksize));
+            // std::cout << "  dst: " << (char*)dst << " " << "src: " << (char*)src << std::endl;
+            memcpy(dst, src, blocksize);
+        }
+        return begin;
+    }
+
+    bool SameRet() const {
+        bool ret = true;
+        for(int i=0;i<outsize; ++i){
+            char* dstv = reinterpret_cast<char *>(rtable + i*blocksize);
+            char* srcv = reinterpret_cast<char *>(tmprtable + i*blocksize);
+            std::string _dstv(dstv);
+            std::string _srcv(srcv);
+
+            // std::cout << "dst: " << _dstv << " " << "src: " << _srcv << std::endl;
+            if(_dstv.compare(_srcv) != 0){
+                ret = false;
+                break;
+            }
+        }
+        return ret;
+    }
+
+    void RollCheck(){
+        cursor _cursor;
+        _cursor.begin = 0;
+        _cursor.whichloop = 0;
+
+        while(step){
+            _Rollback(this, _cursor, _cursor.whichloop);
+            printf("Step:%d, Begin:%d, Loop index:%d\n", step, _cursor.begin, _cursor.whichloop);
+            step /= 2;
+        }
+    }
+
+private:
+    ssize_t blocksize;
+    Tsize insize;
+    Rsize outsize;
+
+    /* 外部管理内存 */
+    uint8_t* ttable;
+    uint8_t* rtable;
+
+    /* 类内管理内存 */
+    uint8_t* tmpttable;
+    uint8_t* tmprtable;
+
+    uint64_t range_low;
+    uint64_t range_high;
+
+    int step;  /* 每次检查的步长 */
+
+    friend void _Rollback(OblidbContinueAttack*, cursor&, int);
+};
+
+class OblidbContinueAttackTest
+{
+public:
+    OblidbContinueAttackTest(
+        uint64_t _begin, uint64_t _end) : begin(_begin), end(_end)
+    {
+        // TODO 边界条件的检测
+        size = end-begin+1;
+    }
+    ~OblidbContinueAttackTest(){};
+
+    size_t Begin() const {return begin;}
+    size_t End() const {return end;}
+    size_t Size() const {return size;}
+private:
+    uint64_t begin;
+    uint64_t end;
+    uint64_t size;
+};
+
+void
+_Rollback(OblidbContinueAttack* ths, cursor& _cursor, int loopindex)
+{
+    uint64_t begin;
+    // 这里的j不一定要由0开始，可以利用之前得到的结果优化，少一些循环
+    for(int j=loopindex;j<ths->insize;++j){
+        ths->ReorderTable(j);
+        begin=ths->SelectRows();
+
+        if(!ths->SameRet()){
+            _cursor.begin = begin;
+            _cursor.whichloop = j;
+            break;
+        }
+    }
+}
+} // namespace attacker

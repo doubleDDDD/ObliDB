@@ -43,6 +43,9 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <set>
+#include <unordered_set>
+#include <algorithm>
 // Needed for definition of remote attestation messages.
 #include "remote_attestation_result.h"
 
@@ -86,6 +89,14 @@
 int oblivStructureSizes[NUM_STRUCTURES] = {0};
 int oblivStructureTypes[NUM_STRUCTURES] = {0};
 uint8_t* oblivStructures[NUM_STRUCTURES] = {0}; //hold pointers to start of each oblivious data structure
+int oblivStructureQueryTypes[NUM_STRUCTURES] = {0};  // 查询类型
+RW_Type oblivStructureStorageTypes[NUM_STRUCTURES] = {MEMORY};  // 存储类型
+
+char *globaltablename;  // 用来暂存tablename的，暂时不支持多线程并发去 access db
+
+// 全局打开表的数组
+oblidbextraio::DBTable* dbtables[NUM_STRUCTURES] = {nullptr};
+
 FILE *readFile = NULL;
 
 uint8_t* msg1_samples[] = { msg1_sample1, msg1_sample2 };
@@ -96,8 +107,75 @@ uint8_t* attestation_msg_samples[] =
 
 oblidbextraio::StorageEngine* storageengine = nullptr;
 
-void ConnectDB(){
-    /* init db, 打开数据库，即open, 就是连接数据库的过程，这个地方就是 single thread */
+// query 对结果表的处理 + 一个回调 用户自行处置
+
+void
+ReOpenDB(oblidbextraio::HeaderPage* header_page, sgx_enclave_id_t enclave_id, int status)
+{
+	int recordcn, i;
+
+	recordcn = header_page->GetRecordCount();
+	std::cout 
+		<< "record count: " << recordcn << std::endl;
+
+	// table 的 index 就认为是在 head_page 中的序列
+	for(i=0;i<recordcn;++i)
+	{
+		int offset = 4 + i * 36;
+		char *raw_name = reinterpret_cast<char *>(header_page->GetData() + offset);
+		int32_t rootpage = *reinterpret_cast<int32_t *>(header_page->GetData() + offset + 32);
+        std::string tbname(raw_name);
+		int encBlockSize = *reinterpret_cast<int *>(header_page->GetData() + offset + 36);
+		int rownum = *reinterpret_cast<int *>(header_page->GetData() + offset + 40);
+		int type = *reinterpret_cast<int *>(header_page->GetData() + offset + 44);
+
+		std::cout
+			<< "index: " << i
+			<< ",table name: " << tbname 
+			<< ",root page id: " << rootpage 
+			<< ",encblocksize: " << encBlockSize
+			<< ",row num: " << rownum
+			<< ",type: " << type << std::endl;
+
+		/**
+		 * 恢复 table 在内存中的数据结构
+		 * 游标按照最大去 set
+		 */
+		assert(dbtables[i]==nullptr);
+		dbtables[i] = new oblidbextraio::DBTable(
+			storageengine->buffer_pool_manager_, 
+			storageengine->disk_manager_, 
+			encBlockSize, 
+			rownum, 
+			type, 
+			rownum, rootpage);
+		
+		oblivStructureSizes[i] = rownum;
+    	oblivStructureTypes[i] = type;
+
+		Obliv_Type _type = static_cast<Obliv_Type>(type);
+		char* _tbname = const_cast<char *>(tbname.c_str());
+		ReopenTable(
+			enclave_id, 
+			(int*)&status, 
+			i,
+			rownum, 
+			_tbname, 
+			tbname.length(), 
+			_type);
+	}
+
+	return;
+}
+
+/**
+ * init db, 打开数据库，即open, 就是连接数据库的过程，这个地方就是 single thread
+ * 如果文件不存在则创建
+ * header page 的插入是创建表或 open 表时候的操作
+ */
+void
+ConnectDB(sgx_enclave_id_t enclave_id, int status)
+{
     std::string db_file_name = "/home/hdd/workspace/ssd_mount/dbpath/oblidbtest.odb";
 
     struct stat buffer;
@@ -114,12 +192,58 @@ void ConnectDB(){
         header_page->Init();
         storageengine->buffer_pool_manager_->UnpinPage(header_page_id, true);  /* 虽然没有任何写操作，但是必须dirty */
         header_page->WUnlatch();
-    }
+    } else {
+		// re open/connect db
+		auto header_page = 
+            static_cast<oblidbextraio::HeaderPage *>(storageengine->buffer_pool_manager_->FetchPage(HEADER_PAGE_ID));
+		if(header_page == nullptr){
+			std::cerr << "re open db failure!" << std::endl;
+			exit(-1);
+		}
+
+		// 要把 app 与 sgx 中的一些全局的数据结构恢复
+		ReOpenDB(header_page, enclave_id, status);
+	}
 }
 
-void CloseDB(){
+void
+CloseDB(){
     storageengine->buffer_pool_manager_->FlushAllDirtyPage();
     delete storageengine;
+}
+
+void
+CrackTable(int index, sgx_enclave_id_t enclave_id, int status)
+{
+	int i;
+	oblidbextraio::DBTable* table = dbtables[index];
+	oblidbextraio::Tuple tuple;
+
+	for(i=0;i<table->TableSize();++i){
+		if(!table->GetTuple(tuple, i)){
+			std::cerr << "Get table failure" << std::endl;
+			exit(-1);
+		}
+		decryptOneBlock(enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)(tuple.GetData()), index);
+	}
+
+	return;
+}
+
+void
+CrackTables(sgx_enclave_id_t enclave_id, int status)
+{
+	// oblidbextraio::DBTable* dbtables[NUM_STRUCTURES] = {nullptr};
+	int i;
+
+	for(i=0;i<NUM_STRUCTURES;++i)
+	{
+		if(!dbtables[i]){ continue; }
+		printf("Crack Table %d\n", i);
+		CrackTable(i, enclave_id, status);
+	}
+
+	return;
 }
 
 // Some utility functions to output some of the data structures passed between
@@ -219,6 +343,9 @@ void PRINT_ATTESTATION_SERVICE_RESPONSE(
  * OCALLS GO HERE
  *
  * */
+void ocall_showquery(int tableid, int querytype){
+	oblivStructureQueryTypes[tableid] = querytype;
+}
 
 void ocall_print(const char *str)
 {
@@ -229,15 +356,15 @@ void ocall_print(const char *str)
     fflush(stdout);  /* 立刻输出 */
 }
 
-void ocall_read_block(
-    int structureId, int index, int blockSize, void *buffer, RW_Type rwtype)
+void
+ocall_read_block(
+    int structureId, int index, int blockSize, void *buffer)
 {
 	//read in to buffer
 	if(blockSize == 0){
 		printf("unkown oblivious data type\n");
 		return;
 	}
-
 
 	//printf("heer\n");fflush(stdout);
 	//printf("index: %d, blockSize: %d structureId: %d\n", index, blockSize, structureId);
@@ -247,31 +374,61 @@ void ocall_read_block(
 	//printf("beginning of mac(buf)? %d\n", ((Encrypted_Linear_Scan_Block*)(buffer))->macTag[0]);
 
 	// 纯内存数据库 memcpy 就 ok
-	// memcpy(
-	// 	buffer, oblivStructures[structureId]+((long)index*blockSize), blockSize);//printf("heer\n");fflush(stdout);
+	memcpy(
+		buffer, oblivStructures[structureId]+((long)index*blockSize), blockSize);//printf("heer\n");fflush(stdout);
 }
 
 /**
  * write out from buffer
  * index is the row number
  */
-void ocall_write_block(
-    int structureId, int index, int blockSize, void *buffer, RW_Type rwtype)
+void
+ocall_write_block(
+    int structureId, int index, int blockSize, void *buffer)
 {
 	if(blockSize == 0){
 		printf("unkown oblivious data type\n");
 		return;
 	}
 
-    if(rwtype == MEMORY){
+	// printf("ocall_write_block: %d,%d,%d\n", structureId, index, blockSize);
+	RW_Type storagetype = oblivStructureStorageTypes[structureId];
+
+    if(storagetype == MEMORY){
         memcpy(oblivStructures[structureId]+((long)index*blockSize), buffer, blockSize);
     } else {
         assert(storageengine);
+
+		/* 根据 structureId 找到对应的 table 对象 */
+		assert(dbtables[structureId]);
+		oblidbextraio::DBTable* table = dbtables[structureId];
+
+		/* 构造 tuple 对象 */
+		oblidbextraio::Tuple tuple(blockSize, (char*)buffer);
+
+		/**
+		 * table->Cursor() 代表当前准备写入的下标
+		 * index 代表的是 tuple index
+		 */
+		if (index < table->Cursor()) {
+			// printf("update\n");
+			/* update tuple */
+			if(!table->UpdateTuple(tuple, index)){
+				std::cerr << "Update failure, re run!" << std::endl;
+				exit(-1);
+			}
+		} else {
+			/* insert tuple */
+			// printf("insert\n");
+			if(!table->InsertTuple(tuple, index)){
+				std::cerr << "Insert failure, re run!" << std::endl;
+				exit(-1);
+			}
+			table->IncrementCursor();
+		}
     }
 
-	// 需要根据structureId找到对应的表的起始page，并且确定一个能用的page，然后再调用page的insert函数
-
-
+	return;
 
 	//printf("data: %d %d %d %d\n", structureId, index, blockSize, ((int*)buffer)[0]);fflush(stdout);
 	//printf("data: %d %d %d\n", structureId, index, blockSize);fflush(stdout);
@@ -293,7 +450,10 @@ void ocall_respond( uint8_t* message, size_t message_size, uint8_t* gcm_mac){
 
 void newStructureinmemory(int newId, Obliv_Type type, int size)
 {
+    // printf("app: %d initializing structure type %d of capacity %d blocks\n", newId, type, size);
     int encBlockSize = getEncBlockSize(type);
+    oblivStructureSizes[newId] = size;
+    oblivStructureTypes[newId] = type;
     long val = (long)encBlockSize*size; /* malloc memory in 不可信内存 */
     oblivStructures[newId] = (uint8_t*)malloc(val);
     if(!oblivStructures[newId]) {
@@ -304,23 +464,47 @@ void newStructureinmemory(int newId, Obliv_Type type, int size)
     return;
 }
 
-void newStructureinperist(int newId, Obliv_Type type, int size)
+/** 
+ * create table 数据库表，即创建表
+ */
+void
+newStructureinperist(int newId, Obliv_Type type, int rownum)
 {
-    /* create table 数据库表 */
     assert(storageengine);
+
+	int encBlockSize = getEncBlockSize(type);
+    if(type == TYPE_ORAM || type == TYPE_TREE_ORAM) {
+		encBlockSize = sizeof(Encrypted_Oram_Bucket);
+	}
+    oblivStructureSizes[newId] = rownum;
+    oblivStructureTypes[newId] = type;
+
+	/**
+	 * 数据库初始化的时候创建过 root page
+	 */
     auto header_page =
         static_cast<oblidbextraio::HeaderPage *>(storageengine->buffer_pool_manager_->FetchPage(HEADER_PAGE_ID));
+
     if(!header_page){
         std::cerr << "new table failure, get header page failure!" << std::endl;
         CloseDB();
         exit(-1);
     }
 
+	// 创建 tuple head file，创建 teble 对象，table 对象会创建 tuple head file
+	// 会调用 disk manager 创建该 table 的第一个page
+	dbtables[newId] = new oblidbextraio::DBTable(
+		storageengine->buffer_pool_manager_, 
+		storageengine->disk_manager_, encBlockSize, rownum, type, 0);
+
     header_page->WLatch();
+
+	std::string tbname(globaltablename);
     // insert table header
-    if (!header_page->InsertRecord(std::to_string(newId), newId)){
+    if (!header_page->InsertRecord(tbname, newId, encBlockSize, rownum, (int)type)){
         std::cerr << "insert failure!" << std::endl;
         header_page->WUnlatch();
+		delete dbtables[newId];
         CloseDB();
         exit(-1);
     }
@@ -328,26 +512,32 @@ void newStructureinperist(int newId, Obliv_Type type, int size)
     storageengine->buffer_pool_manager_->UnpinPage(HEADER_PAGE_ID, true);
     header_page->WUnlatch();
 
-    int encBlockSize = getEncBlockSize(type);
-    if(type == TYPE_ORAM || type == TYPE_TREE_ORAM) {encBlockSize = sizeof(Encrypted_Oram_Bucket);}
-    oblivStructureSizes[newId] = size;
-    oblivStructureTypes[newId] = type;
-
     return;
 }
 
-void ocall_newStructure(int newId, Obliv_Type type, int size, TABLE_TYPE tableType)
+/**
+ * 维护一个数组，表明 table 的类型
+ * int oblivStructureStorageTypes[NUM_STRUCTURES] = {MEMORY};  // 存储类型
+ */
+void
+ocall_newStructure(int newId, Obliv_Type type, int size, TABLE_TYPE tableType)
 {
+    // tableType = TEMP;  // 临时的，disk表现在还不支持
+
     switch (tableType)
     {
     case RET:
     case TEMP:
         newStructureinmemory(newId, type, size);
+		oblivStructureStorageTypes[newId] = MEMORY;
         break;
     default:
         newStructureinperist(newId, type, size);
+		oblivStructureStorageTypes[newId] = DISK;
         break;
     }
+
+	return;
 
 	//this is actual size, the logical size will be smaller for orams
     // //printf("app: initializing structure type %d of capacity %d blocks\n", type, size);
@@ -404,11 +594,505 @@ void ocall_read_file(void *dest, int dsize){
 }
 
 
+/**
+ *****************************
+ */
+/**
+ * db open
+ */
+void
+OpenDB(sgx_enclave_id_t enclave_id, int status)
+{
+	return;
+
+	uint8_t* row = (uint8_t*)malloc(BLOCK_DATA_SIZE);
+	int structureId1 = -1;
+
+    // 把表创建出来
+	Schema rankingsSchema;
+	rankingsSchema.numFields = 4;
+	rankingsSchema.fieldOffsets[0] = 0;
+	rankingsSchema.fieldSizes[0] = 1;
+	rankingsSchema.fieldTypes[0] = CHAR;
+	rankingsSchema.fieldOffsets[1] = 1;
+	rankingsSchema.fieldSizes[1] = 255;
+	rankingsSchema.fieldTypes[1] = TINYTEXT;
+	rankingsSchema.fieldOffsets[2] = 256;
+	rankingsSchema.fieldSizes[2] = 4;
+	rankingsSchema.fieldTypes[2] = INTEGER;
+	rankingsSchema.fieldOffsets[3] = 260;
+	rankingsSchema.fieldSizes[3] = 4;
+	rankingsSchema.fieldTypes[3] = INTEGER;
+
+	int rowline = 36;
+
+    char* tableName = "testdbowc"; // open write close
+	globaltablename = tableName;
+
+    createTable(
+        enclave_id, 
+        (int*)&status, 
+        &rankingsSchema, 
+        tableName, 
+        strlen(tableName), 
+        TYPE_LINEAR_SCAN, 
+        rowline,
+        &structureId1
+    );
+
+	std::ifstream file("orderd.csv");
+	char line[BLOCK_DATA_SIZE];//make this big just in case
+	char data[BLOCK_DATA_SIZE];
+	//file.getline(line, BLOCK_DATA_SIZE);//burn first line
+	row[0] = 'a';
+	for(int i = 0; i < rowline; i++){
+		memset(row, 'a', BLOCK_DATA_SIZE);
+		file.getline(line, BLOCK_DATA_SIZE);
+
+		std::istringstream ss(line);
+		for(int j = 0; j < 3; j++){
+			if(!ss.getline(data, BLOCK_DATA_SIZE, ',')){break;}
+			if(j == 1 || j == 2){
+				int d = 0;
+				d = atoi(data);
+				memcpy(&row[rankingsSchema.fieldOffsets[j+1]], &d, 4);
+			}
+			else{
+				strncpy((char*)&row[rankingsSchema.fieldOffsets[j+1]], data, strlen(data)+1);
+			}
+		}
+
+		/**
+		 * manually insert into the linear scan structure for speed purposes
+		 * 这个函数都是 sgx 外部写，sgx 内部读
+		 */
+		opOneLinearScanBlock(enclave_id, (int*)&status, structureId1, i, (Linear_Scan_Block*)row, 1);
+		incrementNumRows(enclave_id, (int*)&status, structureId1);
+	}
+	printf("Created DBContinueAT table\n");
+
+	// table 创建完成之后 flush 一下
+	storageengine->buffer_pool_manager_->FlushAllDirtyPage();
+
+	// just 测试一下 db 的开关过程
+	// CloseDB();
+	// ConnectDB();
+
+	/**
+	 * 暴力读取并解密
+	 */
+	CrackTables(enclave_id, status);
+	return;
+}
+
+/**
+ * 攻击oblidb continue 的 query, 以获取 range 在 orderd 表中的位置
+ */
+void
+DBContinueAT(sgx_enclave_id_t enclave_id, int status)
+{
+	uint8_t* row = (uint8_t*)malloc(BLOCK_DATA_SIZE);
+
+	int structureId1 = -1;
+	int structureId2 = -1;
+
+    // 把表创建出来
+	Schema rankingsSchema;
+	rankingsSchema.numFields = 4;
+	rankingsSchema.fieldOffsets[0] = 0;
+	rankingsSchema.fieldSizes[0] = 1;
+	rankingsSchema.fieldTypes[0] = CHAR;
+	rankingsSchema.fieldOffsets[1] = 1;
+	rankingsSchema.fieldSizes[1] = 255;
+	rankingsSchema.fieldTypes[1] = TINYTEXT;
+	rankingsSchema.fieldOffsets[2] = 256;
+	rankingsSchema.fieldSizes[2] = 4;
+	rankingsSchema.fieldTypes[2] = INTEGER;
+	rankingsSchema.fieldOffsets[3] = 260;
+	rankingsSchema.fieldSizes[3] = 4;
+	rankingsSchema.fieldTypes[3] = INTEGER;
+
+	int real_rowline = 36; //360000;
+
+    // 这里要搞一个范围查询, 该表中第三列的值有 1-360000
+    // int low = 3787, high = 68361;  // 随机的查询范围 begin end
+    // int lower = 3786, higher = 68362;
+
+	// for debug
+	int low = 10, high = 13, lower = 9, higher = 14;  // 36
+	// int low = 100, high = 190, lower = 99, higher = 191;  // 360
+	// int low = 120, high = 3229, lower = 119, higher = 3230;  // 3600
+
+    Condition cond;
+
+    // Clauses 条款
+    cond.numClauses = 2;
+    // fieldNums 应该指的是列号
+    cond.fieldNums[0] = 3;
+    cond.fieldNums[1] = 3;
+    cond.conditionType[0] = 1;  // 1 means larger
+    cond.conditionType[1] = -1;  // -1 means less than
+    cond.values[0] = (uint8_t*)&lower;
+    cond.values[1] = (uint8_t*)&higher;
+    cond.nextCondition = NULL;
+
+	// 	case TYPE_LINEAR_SCAN:
+	//		encBlockSize = sizeof(Encrypted_Linear_Scan_Block);
+
+    char* tableName = "orderd";
+    createTable(
+        enclave_id, 
+        (int*)&status, 
+        &rankingsSchema, 
+        tableName, 
+        strlen(tableName), 
+        TYPE_LINEAR_SCAN, 
+        real_rowline,
+        &structureId1
+    );//TODO temp really 360010
+
+	return;
+
+	std::ifstream file("orderd.csv");
+
+	char line[BLOCK_DATA_SIZE];//make this big just in case
+	char data[BLOCK_DATA_SIZE];
+	//file.getline(line, BLOCK_DATA_SIZE);//burn first line
+	row[0] = 'a';
+	for(int i = 0; i < real_rowline; i++){
+		memset(row, 'a', BLOCK_DATA_SIZE);
+		file.getline(line, BLOCK_DATA_SIZE);
+
+		std::istringstream ss(line);
+		for(int j = 0; j < 3; j++){
+			if(!ss.getline(data, BLOCK_DATA_SIZE, ',')){break;}
+			if(j == 1 || j == 2){//integer
+				int d = 0;
+				d = atoi(data);
+				memcpy(&row[rankingsSchema.fieldOffsets[j+1]], &d, 4);
+			}
+			else{//tinytext
+				strncpy((char*)&row[rankingsSchema.fieldOffsets[j+1]], data, strlen(data)+1);
+			}
+		}
+
+		//manually insert into the linear scan structure for speed purposes
+		opOneLinearScanBlock(enclave_id, (int*)&status, structureId1, i, (Linear_Scan_Block*)row, 1);
+		incrementNumRows(enclave_id, (int*)&status, structureId1);
+	}
+	printf("Created DBContinueAT table\n");
+	return;
+
+	Obliv_Type _type = static_cast<Obliv_Type>(oblivStructureTypes[structureId1]);
+    size_t ATK_BLOCK_SIZE = getEncBlockSize(_type);
+	char tmparray[ATK_BLOCK_SIZE];
+
+	int ttableid = structureId1;
+	// 完整的input表
+    uint8_t* Ttable = (uint8_t*)oblivStructures[ttableid];
+	size_t T = real_rowline;  // 360000
+
+	/**
+	 * debug 测试一下内存中的value能否再读回来
+	 */
+	// std::fstream sgx_db_io_;
+	// std::string sgxname("testsgx.dat");
+
+	// sgx_db_io_.open(sgxname, std::ios::binary | std::ios::in | std::ios::out);
+    // // directory or file does not exist
+    // if (!sgx_db_io_.is_open()) {
+    //     sgx_db_io_.clear();
+    //     // create a new file
+    //     sgx_db_io_.open(sgxname, std::ios::binary | std::ios::trunc | std::ios::out);
+    //     sgx_db_io_.close();
+    //     // reopen with original mode
+    //     sgx_db_io_.open(sgxname, std::ios::binary | std::ios::in | std::ios::out);
+    // }
+
+	// for(int _sgx=0;_sgx<T;++_sgx){
+	// 	size_t _offset = _sgx*ATK_BLOCK_SIZE;
+	// 	char* _sgxt = reinterpret_cast<char *>(Ttable + _offset);
+	// 	memcpy((void *)tmparray, (void *)_sgxt, ATK_BLOCK_SIZE);
+	// 	// std::string ___sgxt;
+	// 	// // 这样来保存密文是没有什么问题的，后面看下解决方案
+	// 	// for(int st=0;st<ATK_BLOCK_SIZE;++st){___sgxt.push_back(tmparray[st]);
+	// 	// sgx_db_io_.seekp(_offset);
+	// 	sgx_db_io_.write(_sgxt, ATK_BLOCK_SIZE);
+	// }
+	// sgx_db_io_.sync();
+
+	// for(int _sgx=0;_sgx<T;++_sgx){
+	// 	size_t _offset = _sgx*ATK_BLOCK_SIZE;
+	// 	sgx_db_io_.seekp(_offset);
+	// 	sgx_db_io_.read(tmparray, ATK_BLOCK_SIZE);
+	// 	decryptOneBlock(enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)tmparray, 0);
+	// }
+	// sgx_db_io_.close();
+
+	// 尝试读回来
+	// std::ifstream sgxfile("testsgx.dat");
+	// for(int i = 0; i < real_rowline; i++){
+	// 	sgxfile.getline(tmparray, ATK_BLOCK_SIZE);
+	// 	decryptOneBlock(enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)tmparray, 0);
+	// }
+	// return;  // 测试一下写下去还能不能再读回来
+
+    /**
+     * the 4th para, if colChoice = -1, select all columns
+     * the 8th means continuous
+     */
+    selectRows(
+        enclave_id, 
+        (int*)&status, 
+        "orderd", -1, cond, -1, -1, 1, 0); //continuous
+    
+    printf("Query over, Start cracked!\n");
+
+    // 找到原表与原结果表，原表与结果表的大小算已知条件
+    
+    int rtableid = 1;
+
+    // low = 3787, high = 68361
+    attacker::OblidbContinueAttackTest test(low, high);
+
+    size_t R = test.Size();
+    size_t STEP = R;
+    
+    size_t RANGE_LOW = test.Begin();
+    size_t RANGE_HIGH = test.End();
+
+    assert(R==oblivStructureSizes[rtableid]);
+
+	// 完整的output表, 重新分配，因为结果表的这部分会被清理掉，驻留在 sgx 之外
+    // uint8_t* Rtable = (uint8_t*)malloc(ATK_BLOCK_SIZE*oblivStructureSizes[rtableid]);  // about 35 M
+	// memcpy((void *)Rtable, (void *)oblivStructures[rtableid], ATK_BLOCK_SIZE*oblivStructureSizes[rtableid]);
+	printf(
+		"Return table id: %d, addr of return table: %p, size: %d\n", 
+		rtableid, oblivStructures[rtableid], ATK_BLOCK_SIZE*oblivStructureSizes[rtableid]);
+
+	// R表的结果可以写到set中，后面都直接用set去比完事, set 是有序的容器
+	std::set<std::string> Rtable;
+	std::set<std::string> tmpRtable;
+	for(int _ii=0;_ii<R;++_ii){
+		char* _srcv = reinterpret_cast<char *>(oblivStructures[rtableid] + _ii*ATK_BLOCK_SIZE);
+		memcpy((void *)tmparray, (void *)_srcv, ATK_BLOCK_SIZE);
+		// decryptOneBlock(enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)tmparray, 0);
+		// std::string __srcv(_srcv);  // char* 是 \0 结束的，std::string 相当于是容器，不是以 \0 为结束符的
+		std::string __srcv;
+		// 这样来保存密文是没有什么问题的，后面看下解决方案
+		for(int st=0;st<ATK_BLOCK_SIZE;++st){__srcv.push_back(tmparray[st]);}
+		Rtable.insert(__srcv);
+		// __srcv.copy(tmparray, ATK_BLOCK_SIZE, 0);
+		// std::cout << __srcv.length() << std::endl;
+		// decryptOneBlock(enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)__srcv.c_str(), 0);
+	}
+	// for(auto a=Rtable.begin();a!=Rtable.end();++a){
+	// 	decryptOneBlock(enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)((*a).c_str()), 0);
+	// }
+
+	/**
+	 * 打印 T 表与 R 表，仅 debug 用，且数量较少
+	 * continue 的结果表本身就不是排序的，是取模之后放到结果表中的，是有两段连续的过程
+	 */
+	// // debug T 表
+	// printf("T table\n");
+	// for(int _ii=0;_ii<T;++_ii){
+	// 	char* srcv = reinterpret_cast<char *>(Ttable + _ii*ATK_BLOCK_SIZE);
+	// 	decryptOneBlock(enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)srcv, 0);
+	// }
+	// // debug R 表
+	// printf("R table\n");
+	// for(int _jj=0;_jj<R;++_jj){
+	// 	char* dstv = reinterpret_cast<char *>(oblivStructures[rtableid] + _jj*ATK_BLOCK_SIZE);
+	// 	decryptOneBlock(enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)dstv, 0);
+	// }
+	// return;
+
+    // copy 返回表之后删除返回表
+    deleteTable(enclave_id, (int*)&status, "ReturnTable");
+
+    size_t lowindx = RANGE_LOW - 1;
+    size_t upindex = RANGE_HIGH;
+
+    std::cout 
+        << "Finish the building of T and R" << std::endl
+        << "    Begin in T:" << lowindx << "    we will crack it" << std::endl
+        << "    R:" << R << std::endl
+        << "    T:" << T << std::endl
+        << "    ATK_BLOCK_SIZE:" << ATK_BLOCK_SIZE << std::endl
+        << "    RANGE_LOW: " << RANGE_LOW << std::endl
+        << "    RANGE_HIGH: " << RANGE_HIGH << std::endl;
+
+
+    // 创建临时表，将原表重排序后输入, 重排序的过程无需进入sgx，在sgx外完成copy就可以了
+    // id 应该是 2
+    char* reordertableName = "reorderd";
+    createTable(
+        enclave_id, 
+        (int*)&status, 
+        &rankingsSchema, 
+        reordertableName, 
+        strlen(reordertableName), 
+        TYPE_LINEAR_SCAN, 
+        real_rowline,
+        &structureId2
+    );
+
+    uint8_t* tmpttable = (uint8_t*)oblivStructures[structureId2];
+    assert(1==structureId2);
+
+    // TODO 参数传的乱，先写一个长函数吧
+    attacker::cursor _cursor;
+    _cursor.begin = 0;
+    _cursor.whichloop = 0;
+
+    uint64_t rollbackbegin;
+    uint64_t reorderend;
+    void* reorderdst;
+	void* reordersrc;
+	bool same;
+	char* dstv;  // 原表
+	char* srcv;  // 临时表
+
+    while(STEP)
+	{
+		/**
+		 * gen reorder table
+		 */
+		// 这里的j不一定要由0开始，可以利用之前得到的结果优化，少一些循环
+        // for(int j=_cursor.whichloop;j<T;++j)
+		for(int j=_cursor.whichloop;j<T;++j)
+        {
+			/**
+			 * 临时表地址 tmpttable，它的数据来源于乱序后的 input 表，直接copy就可以了
+			 * query 乱序表的时候再进入sgx即可
+			 * 理想很美好，但是现实很骨感，还是需要用进入到sgx去写，否则有一个地址的校验不过
+			 * 但是调整顺序之后，再次写到sgx之外的空间还会有问题，与原内容已经不一致了
+			 * 很难再次使用 oblidb 的 query 方法，所以说服力会少一点
+			 * 加密的块中同时保存了 这个 tuple 应该的行号以及 版本号，这个直接乱序表再去 apply 是有问题的
+			 */
+            reorderend = static_cast<uint64_t>((j + STEP) % T);
+
+            if(j > reorderend){
+                for(int index=0;index<T;++index)
+				{
+					reordersrc = reinterpret_cast<void *>((Ttable + index*ATK_BLOCK_SIZE));
+
+                    if(index < reorderend){ // 采样数据, 在table的最末端
+                        reorderdst = \
+							reinterpret_cast<void *>((tmpttable + (T-reorderend+index)*ATK_BLOCK_SIZE));
+                    } else if (index>=reorderend && index<j){ // 整体前移的数据
+                        reorderdst = \
+							reinterpret_cast<void *>((tmpttable + (index-reorderend)*ATK_BLOCK_SIZE));
+                    } else { // 采样数据
+                        reorderdst = \
+							reinterpret_cast<void *>((tmpttable + (index-reorderend)*ATK_BLOCK_SIZE));
+                    }
+
+					memcpy(reorderdst, reordersrc, ATK_BLOCK_SIZE);
+                }
+            } else {
+				for(int index=0;index<T;++index)
+				{
+					reordersrc = reinterpret_cast<void *>((Ttable + index*ATK_BLOCK_SIZE));
+
+					if(index < j){
+						reorderdst = reinterpret_cast<void *>((tmpttable + index*ATK_BLOCK_SIZE));
+					} else if (index >= j && index < reorderend){
+						reorderdst = reinterpret_cast<void *>((tmpttable + (T-STEP+index-j)*ATK_BLOCK_SIZE));
+					} else {
+						reorderdst = reinterpret_cast<void *>((tmpttable + (index-STEP)*ATK_BLOCK_SIZE));
+					}
+
+					memcpy(reorderdst, reordersrc, ATK_BLOCK_SIZE);
+				}
+            }
+
+			/**
+			 * apply the same query to reorderd table
+			 * the id of new return table (r temp table) should be 2
+			 * 
+			 * 硕哥说的攻击方式，尝试一下按照实际形式去存取
+			 */
+			selectRows(
+				enclave_id, (int*)&status, "reorderd", -1, cond, -1, -1, 1, 0); // 8th para means continuous
+			// return;
+
+			same = true;
+			// printf("first query,%d\n",oblivStructureSizes[2]);
+			// printf("R is %d\n", R);  // 64575
+			/**
+			 * 之前的比较算法包含了对顺序的约束，认为只要顺序不一致，就不一样，但是并非如此
+			 * 结果表本身就不是按顺序的，但是会漏值
+			 * 所以比较的时候就比较考验算法了
+			 * 以标准的为基准，就是最简单的2重循环，这个必然是不可以的，参考一下LeetCode的第一题，可以用空间开销来换
+			 */
+			// for(int ii=0;ii<R;++ii){
+			// 	char* srcv = reinterpret_cast<char *>(Rtable + ii*ATK_BLOCK_SIZE);
+			// 	char* dstv = reinterpret_cast<char *>(oblivStructures[2] + ii*ATK_BLOCK_SIZE);
+			// 	std::string _dstv(dstv);
+			// 	std::string _srcv(srcv);
+
+			// 	// std::cout << "dst: " << _dstv << " " << "src: " << _srcv << std::endl;
+			// 	decryptOneBlock(enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)srcv, 1);
+			// 	decryptOneBlock(enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)dstv, 2);
+			// 	// return;
+
+			// 	// if(_dstv.compare(_srcv) != 0){
+			// 	// 	same = false;
+			// 	// 	break;
+			// 	// }
+			// }
+			tmpRtable.clear();
+			for(int _ii=0;_ii<R;++_ii){
+				char* _srcv = reinterpret_cast<char *>(oblivStructures[2] + _ii*ATK_BLOCK_SIZE);
+				memcpy((void *)tmparray, (void *)_srcv, ATK_BLOCK_SIZE);
+				std::string __srcv;
+				// 这样来保存密文是没有什么问题的，后面看下解决方案
+				for(int st=0;st<ATK_BLOCK_SIZE;++st){__srcv.push_back(tmparray[st]);}
+				tmpRtable.insert(__srcv);
+				// decryptOneBlock(enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)__srcv.c_str(), 0);
+			}
+
+			// // set 均为有序的集合，直接按照顺序容器的方式去比较即可
+			// for(auto rt=Rtable.begin(), trt=tmpRtable.begin();rt!=Rtable.end(); ++rt, ++trt){
+			// 	same = sgxCompareBlock(
+			// 		enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)__srcv.c_str(), (Encrypted_Linear_Scan_Block*)__srcv.c_str())
+			// }
+			if(oblivStructureQueryTypes[2]!=88){
+				printf("Querytype:%d\n", oblivStructureQueryTypes[2]);
+				same = false;
+			}
+			oblivStructureQueryTypes[2]=0;
+			/**
+			 * after compare, if equal, break and out, the returntable must be deleted
+			 */
+			deleteTable(enclave_id, (int*)&status, "ReturnTable");
+
+			// printf("STEP=%d, J=%d\n", STEP, j);
+			if(!same){
+				_cursor.begin = 0;  // 常规算法实现中，这里应该是 select 的返回值，是不会泄露到sgx之外的，真实用例中，这个东西是没有用的
+				_cursor.whichloop = j;
+				// printf("	Different\n");
+				break;
+			}
+        }  // in a loop, every time of the loop, a new r table generated
+
+        printf(
+            "KEY OUT, Step:%d, Loop index:%d\n", 
+            STEP, _cursor.whichloop);
+        STEP /= 2;
+    }
+
+    deleteTable(enclave_id, (int*)&status, "orderd");
+    deleteTable(enclave_id, (int*)&status, "reorderd");
+
+    return;
+}
 
 /**
  *****************************
  */
-
 
 
 void BDB1Index(sgx_enclave_id_t enclave_id, int status){
@@ -3635,12 +4319,12 @@ int main(int argc, char* argv[])
                 goto CLEANUP;
             }
         }
-        fprintf(OUTPUT, "\nSecret successfully received from server.");
-        fprintf(OUTPUT, "\nRemote attestation success!");
+        fprintf(OUTPUT, "\nSecret successfully received from server.\n");
+        fprintf(OUTPUT, "\nRemote attestation success!\n");
     }
 
     /* connect to db */
-    ConnectDB();
+    ConnectDB(enclave_id, status);
 
     //TODO: My untrusted application code goes here
     /*
@@ -3699,11 +4383,13 @@ int main(int argc, char* argv[])
         //real world query tests
         //PICK EXPERIMENT TO RUN HERE
 
+		// OpenDB(enclave_id, status);
+		// DBContinueAT(enclave_id, status);
         //nasdaqTables(enclave_id, status); //2048	
         //complaintTables(enclave_id, status); //4096	
         //flightTables(enclave_id, status); //512 (could be less, but we require 512 minimum)	
         // BDB1Index(enclave_id, status);//512		
-        BDB1Linear(enclave_id, status);//512		
+        // BDB1Linear(enclave_id, status);//512		
         //BDB2(enclave_id, status, 0);//2048		
         //BDB2Index(enclave_id, status, 0);//2048	
         //BDB3(enclave_id, status, 0);//2048		
@@ -4169,13 +4855,6 @@ int main(int argc, char* argv[])
         	printf("invalid TEST_TYPE!\n");
         	break;
         }*/
-
-
-
-
-
-
-
         //}
 
         /*testOpOram(enclave_id, &status);

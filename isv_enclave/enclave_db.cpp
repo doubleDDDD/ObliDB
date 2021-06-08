@@ -16,7 +16,12 @@ int incrementNumRows(int structureId){
 	numRows[structureId]++;
 }
 
-int rowMatchesCondition(Condition c, uint8_t* row, Schema s){
+/**
+ * 比较有2次，一次是预处理，一次是真正的处理
+ */
+int
+rowMatchesCondition(Condition c, uint8_t* row, Schema s)
+{
 
 	/*for(int j = 0; j < schemas[0].numFields; j++){
 		switch(schemas[0].fieldTypes[j]){
@@ -43,26 +48,27 @@ int rowMatchesCondition(Condition c, uint8_t* row, Schema s){
 			c = *c.nextCondition;
 		}
 		sat = 0;
-		for(int i = 0; i < c.numClauses; i++){//printf("about to do a comparison\n");
+		for(int i = 0; i < c.numClauses; i++){
+			// printf("about to do a comparison\n");
 			switch(s.fieldTypes[c.fieldNums[i]]){
 			case INTEGER:
 				int val, cond;
 				memcpy(&val, &row[s.fieldOffsets[c.fieldNums[i]]], 4);
 				memcpy(&cond, c.values[i], 4);
+
+				// printf("value is: %d, cond is %d, rela is %d\n", val, cond, c.conditionType[i]);
+				// 如果不符合条件则 sat 应该重新变成 0, 这里是并列且的关系，所以只要有一个不符合，直接return即可
 				if(c.conditionType[i] == 0){ //equality
-					if(val == cond) {
-						sat = 1;
-					}
+					if(val == cond) {sat = 1;} 
+					else {sat = 0; return 0;}
 				}
 				else if(c.conditionType[i] == 1) { //row val is greater than
-					if(val > cond) {
-						sat = 1;
-					}
+					if(val > cond) {sat = 1;}
+					else {sat = 0; return 0;}
 				}
 				else { //row val is less than
-					if(val < cond) {
-						sat = 1;
-					}
+					if(val < cond) {sat = 1;}
+					else {sat = 0; return 0;}
 				}
 				break;
 			case TINYTEXT: //only check equality
@@ -81,10 +87,12 @@ int rowMatchesCondition(Condition c, uint8_t* row, Schema s){
 		//the order of these ifs is important
 		if(c.numClauses == 0) sat = 1; //case there is no condition
 		if(row[0] == '\0') sat = 0; //case row is deleted/dummy
-		if(!sat) return 0;
+		if(!sat) {
+			return 0;
+		}
 		flag = 1;
 	} while(c.nextCondition != NULL);
-	//printf("satisfied!\n");
+	// printf("satisfied!\n");
 	return 1;
 }
 
@@ -134,6 +142,7 @@ int createTable(
 	numberOfRows += (numberOfRows == 0);
 	int initialSize = numberOfRows;  // 一行一个 tuple，最终到底需要多少行
 
+	// printf("init size is %d\n", initialSize);
 	// structureId 会被分配一个表号
 	retVal = init_structure(initialSize, type, structureId, tabletype);
 	if(retVal != SGX_SUCCESS) {return 5;}
@@ -147,10 +156,38 @@ int createTable(
 	rowsPerBlock[*structureId] = 1; //fixed at 1 for now, see declaration
 	numRows[*structureId] = 0;
 
+	// printf("Finish table %s,%d create\n", tableName, *structureId);
+
 	return 0;
 }
 
-int deleteTable(char *tableName) {
+/**
+ * reopen table in sgx
+ * 这个地方可能会漏东西
+ */
+int
+ReopenTable(
+	int structureId, int rownum, char* tbname, int tbnamelen, Obliv_Type type)
+{
+	int logicalSize = rownum;
+	logicalSizes[structureId] = logicalSize;
+	revNum[structureId] = (int*)malloc(logicalSize*sizeof(int));
+	memset(&revNum[structureId][0], 0, logicalSize*sizeof(int));
+
+	oblivStructureSizes[structureId] = logicalSize;
+	oblivStructureTypes[structureId] = type;
+	/***/
+	tableNames[structureId] = (char*)malloc(tbnamelen+1);
+	strncpy(tableNames[structureId], tbname, tbnamelen+1);
+	// 我草，忘记存 schame 了
+	// memcpy(&schemas[structureId], schema, sizeof(Schema));
+	rowsPerBlock[structureId] = 1; //fixed at 1 for now, see declaration
+	numRows[structureId] = rownum;
+
+	return 0;
+}
+
+int deleteTable(char* tableName) {
 	int structureId = getTableId(tableName);
 	free_structure(structureId);
 	free(tableNames[structureId]);
@@ -2017,20 +2054,134 @@ int selectRows(
 				int dummyVar = 0;
 				int baseline = 0;
 
-				//first pass to determine 1) output size (count), 2) whether output is one continuous chunk (continuous)
+				/**
+				 * first pass to determine 1) output size (count), 2) whether output is one continuous chunk (continuous)
+				 * planer，选择合适的query算法
+				 */
+				// for(int i = 0; i < oblivStructureSizes[structureId]; i++){
+				// 	/** 
+				// 	 * 这个for循环可以把表过一遍
+				// 	 * 知道 input 表的大小以及 output table 的大小
+				// 	 * 根据这两个值就可以选择合适的 query 算法
+				// 	 * 尽量少的泄露信息
+				// 	 */
+				// 	opOneLinearScanBlock(structureId, i, (Linear_Scan_Block*)row, 0);  /* read table out of sgx */
+				// 	row = ((Linear_Scan_Block*)row)->data;  /* 解密后的明文 */
+				// 	//printf("ready for a comparison? %d\n", c.numClauses);
+
+				// 	if(rowMatchesCondition(c, row, schemas[structureId]) && row[0] != '\0'){
+				// 		/* hit */					
+				// 		count++;  /* hit times */
+				// 		if(!continuous && !contTemp){
+				// 			//first hit
+				// 			continuous = 1;
+				// 		}
+				// 		else if(continuous && contTemp){
+				// 			//a noncontinuous hit
+				// 			continuous = 0;
+				// 		}
+				// 	}
+				// 	else{
+				// 		/* no hit */
+				// 		dummyVar++;  /* miss times */
+				// 		if(continuous && !contTemp){
+				// 			//end of continuous chunk
+				// 			contTemp = 1;
+				// 		}
+				// 	}
+				// }
+
+				// printf("Planer: continuous:%d\n", continuous);
+				// // printf("Hit count is %d\n", count);
+
+				// if(count > oblivStructureSizes[structureId]*.01*PERCENT_ALMOST_ALL && colChoice == -1){ 
+				// 	//return almost all only if the whole row is selected (to make my life easier)
+				// 	/* > 0.9 almost all */
+				// 	almostAll = 1;
+				// }
+				// if(count < 5*ROWS_IN_ENCLAVE){
+				// 	small = 1;  /* 命中很少 */
+				// 	if(count < ROWS_IN_ENCLAVE && continuous == 1) continuous = 0;
+				// }
+				// //printf("%d %f\n",count,  oblivStructureSizes[structureId]*.01*PERCENT_ALMOST_ALL); //count and count needed for almost all
+
+				// printf("Planer: continuous:%d,small:%d,almostAll:%d\n", continuous, small, almostAll);
+
+				// switch(algChoice){
+				// case 1:
+				// 	continuous = 1;
+				// 	small = 0;
+				// 	almostAll = 0;
+				// 	break;
+				// case 2:
+				// 	/* 2 means small */
+				// 	continuous = 0;
+				// 	small = 1;
+				// 	almostAll = 0;
+				// 	break;
+				// case 3:
+				// 	/* hash */
+				// 	continuous = 0;
+				// 	small = 0;
+				// 	almostAll = 0;
+				// 	break;
+				// case 4:
+				// 	continuous = 0;
+				// 	small = 0;
+				// 	almostAll = 1;
+				// 	break;
+				// case 5:
+				// 	/* base line */
+				// 	baseline = 1;
+				// 	continuous = 0;
+				// 	small = 0;
+				// 	almostAll = 0;
+				// 	break;
+				// }
+
+				// //create table to return
+				// if(almostAll){
+				// 	/* 原表的大小 */
+				// 	retNumRows = oblivStructureSizes[structureId];
+				// }
+				// else if(small || continuous || baseline){
+				// 	/* 结果的大小 */
+				// 	retNumRows = count;
+				// }
+				// else{
+				// 	/* hash 5倍结果的大小 */
+				// 	retNumRows = 5*count; //hash
+				// }
+				// if(colChoice != -1){ 
+				// 	// include selected col only
+				// 	// if colChoice == -1 means all
+				// 	retSchema.numFields = 2;
+				// 	retSchema.fieldOffsets[0] = 0;
+				// 	retSchema.fieldOffsets[1] = 1;
+				// 	retSchema.fieldSizes[0] = 1;
+				// 	retSchema.fieldSizes[1] = colChoiceSize;
+				// 	retSchema.fieldTypes[0] = CHAR;
+				// 	retSchema.fieldTypes[1] = colChoiceType;
+				// }
+				// else{
+				// 	//include whole selected row
+				// 	retSchema = schemas[structureId];
+				// }
+				// if(intermediate) retNumRows = oblivStructureSizes[structureId];
+				// if(PADDING) retNumRows = PADDING;
+				// //printf("%d %d %d %d %s %d %d\n", retNameLen, retNumRows, retStructId, retType, retName, retSchema.numFields, retSchema.fieldSizes[1]);
+				// printf(
+				// 	"Planer: continuous:%d,small:%d,almostAll:%d,retNumRows:%d\n", continuous, small, almostAll, retNumRows);
+
+				/**
+				 * 改造版 planer，如果有 Continuous, 就一定要用 Continuous
+				 */
 				for(int i = 0; i < oblivStructureSizes[structureId]; i++){
-					/** 
-					 * 这个for循环可以把表过一遍
-					 * 知道 input 表的大小以及 output table 的大小
-					 * 根据这两个值就可以选择合适的 query 算法
-					 * 尽量少的泄露信息
-					 */
 					opOneLinearScanBlock(structureId, i, (Linear_Scan_Block*)row, 0);  /* read table out of sgx */
 					row = ((Linear_Scan_Block*)row)->data;  /* 解密后的明文 */
-					//printf("ready for a comparison? %d\n", c.numClauses);
 
 					if(rowMatchesCondition(c, row, schemas[structureId]) && row[0] != '\0'){
-						/* hit */
+						/* hit */					
 						count++;  /* hit times */
 						if(!continuous && !contTemp){
 							//first hit
@@ -2052,61 +2203,77 @@ int selectRows(
 				}
 
 				if(count > oblivStructureSizes[structureId]*.01*PERCENT_ALMOST_ALL && colChoice == -1){ 
-					//return almost all only if the whole row is selected (to make my life easier)
-					/* > 0.9 almost all */
 					almostAll = 1;
 				}
 				if(count < 5*ROWS_IN_ENCLAVE){
 					small = 1;  /* 命中很少 */
-					if(count < ROWS_IN_ENCLAVE && continuous == 1) continuous = 0;
+					// if(count < ROWS_IN_ENCLAVE && continuous == 1) continuous = 0;
 				}
-				//printf("%d %f\n",count,  oblivStructureSizes[structureId]*.01*PERCENT_ALMOST_ALL); //count and count needed for almost all
 
-				switch(algChoice){
-				case 1:
+				if(continuous){
+					/* continus 的优先级是最高的 */
 					continuous = 1;
 					small = 0;
 					almostAll = 0;
-					break;
-				case 2:
-					/* 2 means small */
-					continuous = 0;
-					small = 1;
-					almostAll = 0;
-					break;
-				case 3:
-					/* hash */
-					continuous = 0;
-					small = 0;
-					almostAll = 0;
-					break;
-				case 4:
+				} else if (almostAll){
 					continuous = 0;
 					small = 0;
 					almostAll = 1;
-					break;
-				case 5:
-					/* base line */
-					baseline = 1;
+				} else if (small) {
 					continuous = 0;
-					small = 0;
+					small = 1;
 					almostAll = 0;
-					break;
+				} else {
+					switch(algChoice){
+					case 1:
+						continuous = 1;
+						small = 0;
+						almostAll = 0;
+						break;
+					case 2:
+						/* 2 means small */
+						continuous = 0;
+						small = 1;
+						almostAll = 0;
+						break;
+					case 3:
+						/* hash */
+						continuous = 0;
+						small = 0;
+						almostAll = 0;
+						break;
+					case 4:
+						/* large */
+						continuous = 0;
+						small = 0;
+						almostAll = 1;
+						break;
+					case 5:
+						/* base line */
+						baseline = 1;
+						continuous = 0;
+						small = 0;
+						almostAll = 0;
+						break;
+					}
 				}
 
 				//create table to return
 				if(almostAll){
+					/* 原表的大小 */
 					retNumRows = oblivStructureSizes[structureId];
 				}
 				else if(small || continuous || baseline){
+					/* 结果的大小 */
 					retNumRows = count;
 				}
 				else{
+					/* hash 5倍结果的大小 */
 					retNumRows = 5*count; //hash
 				}
 				if(colChoice != -1){ 
 					// include selected col only
-					// if colChoice == 1 means all
+					// if colChoice == -1 means all
 					retSchema.numFields = 2;
 					retSchema.fieldOffsets[0] = 0;
 					retSchema.fieldOffsets[1] = 1;
@@ -2122,8 +2289,11 @@ int selectRows(
 				if(intermediate) retNumRows = oblivStructureSizes[structureId];
 				if(PADDING) retNumRows = PADDING;
 				//printf("%d %d %d %d %s %d %d\n", retNameLen, retNumRows, retStructId, retType, retName, retSchema.numFields, retSchema.fieldSizes[1]);
+				// printf(
+				// 	"Planer: continuous:%d,small:%d,almostAll:%d,retNumRows:%d\n", continuous, small, almostAll, retNumRows);
+				// printf("retNumRows is %d\n", retNumRows);
 
-				// 离开可信区去创建新表，仅在内存中创建
+				// 离开可信区去创建结果表，仅在内存中创建
 				int out = createTable(&retSchema, retName, retNameLen, retType, retNumRows, &retStructId);
 
 				//printf("%d |\n", retNumRows);
@@ -2141,31 +2311,37 @@ int selectRows(
 				if(baseline){
 					// Naive in article
 					printf("BASELINE\n");
-					// 分配一个 oram block 的大小
-					Oram_Block* oBlock = (Oram_Block*)malloc(getBlockSize(TYPE_ORAM));
+					Oram_Block* oBlock = (Oram_Block*)malloc(getBlockSize(TYPE_ORAM));  // 分配一个 oram block 的大小
 					int oramTableId = -1;
 					char* oramName = "tempOram";
 					/**
 					 * create oram out table, create table in memory
 					 * 占用一个表号，申请内存，全部用垃圾数据写一遍先
-					 * 最后表编号返回 oramTableId
+					 * 最后写表编号到 oramTableId 线程安全递增的值
+					 * 4R 大小
+					 * 具有指导思想与意义的
 					 */
 					createTable(&retSchema, oramName, strlen(oramName), TYPE_ORAM, retNumRows, &oramTableId);
 					memset(oBlock, 0, sizeof(Oram_Block));
 					opOramBlock(oramTableId, 0, oBlock, 1);
 
-					int oramRows = 0;
+					int oramRows = 0;  // 符合条件的行
 					for(int i = 0; i < oblivStructureSizes[structureId]; i++){
+						/* read every row, copy data from 不可信区域到 enclave 中的 (Linear_Scan_Block*)oBlock->data */
 						opOneLinearScanBlock(structureId, i, (Linear_Scan_Block*)oBlock->data, 0);
 						//oBlock->data = ((Linear_Scan_Block*)(oBlock->data))->data;
 						int match = rowMatchesCondition(c, oBlock->data, schemas[structureId]) && oBlock->data[0] != '\0';
 						if(colChoice != -1){
+							/* 只选择需要的列 */
 							memset(&oBlock->data[0], 'a', 1);
 							memmove(&oBlock->data[1], &row[colChoiceOffset], colChoiceSize);//row[0] will already be not '\0'
 						}
+
+						// 必须有一个 oram 操作
 						oBlock->actualAddr = oramRows;
 						if(match){
 							usedBlocks[oramTableId][oramRows]=1;
+							/* 这个函数复杂 */
 							opOramBlock(oramTableId, oramRows, oBlock, 1);  // write
 							oramRows++;
 						}
@@ -2175,6 +2351,7 @@ int selectRows(
 							dummyVar++;
 						}
 					}
+
 					//copy back to linear structure
 					for(int i = 0; i < oramRows; i++){
 						opOramBlock(oramTableId, i, oBlock, 0);
@@ -2184,17 +2361,20 @@ int selectRows(
 					free(oBlock);
 				}
 				else if(continuous){
-					//use continuous chunk algorithm
+					// use continuous chunk algorithm
+					// 结果表的大小与实际结果一致，即 count
 					printf("CONTINUOUS\n");
 					int rowi = -1, dummyVar = 0;//NOTE: rowi left in for historical reasons; it should be replaced by i
 					for(int i = 0; i < oblivStructureSizes[structureId]; i++){
 						if(count == 0) break;
+						/* 读 T 表 */
 						opOneLinearScanBlock(structureId, i, (Linear_Scan_Block*)row, 0);
 
 						row = ((Linear_Scan_Block*)row)->data;
 						rowi++;
 						//printf("here2 %d %d\n", rowi, count);
 
+						/* 读 R 表 */
 						opOneLinearScanBlock(retStructId, rowi%count, (Linear_Scan_Block*)row2, 0);
 						//printf("here2\n");
 						row2 = ((Linear_Scan_Block*)row2)->data;
@@ -2208,11 +2388,13 @@ int selectRows(
 							numRows[retStructId]++;//printf("HEER %d %d", retStructId, numRows[retStructId]);
 						}
 						else{
+							/* row2可能已经是结果了，这里仅仅是重写写下去而已 */
 							opOneLinearScanBlock(retStructId, rowi%count, (Linear_Scan_Block*)row2, 1);
 							dummyVar++;
 						}
 					}
-					//printTable("ReturnTable");
+					// printTable("ReturnTable");
+					ocall_showquery(retStructId, 88);
 				}
 				else{
 					//pick one of other algorithms
@@ -2238,7 +2420,6 @@ int selectRows(
 								numRows[retStructId]--;
 								//printf("LOOLZ %d\n", numRows[retStructId]);
 							}
-
 						}
 					}
 					else if(small){ //option 1 ("small")
@@ -2253,25 +2434,25 @@ int selectRows(
 							if(count == 0) break;
 							int rowi = -1;
 							for(int i = 0; i < oblivStructureSizes[structureId]; i++){
-								opOneLinearScanBlock(structureId, i, (Linear_Scan_Block*)row, 0);
+								/* 遍历所有 tuple */
+								opOneLinearScanBlock(structureId, i, (Linear_Scan_Block*)row, 0);  /* 读一个tuple上来 */
 								row = ((Linear_Scan_Block*)row)->data;
 
 								if(row[0] != '\0') rowi++;
 								else dummyCounter++;
 
+								// 未暂停
 								isNotPaused = storageCounter < ROWS_IN_ENCLAVE && rowi >= pauseCounter && row[0] != '\0';
-								if(isNotPaused){
-									pauseCounter++;
-								}
-								else{
-									dummyCounter++;
-								}
+								if(isNotPaused){pauseCounter++;}
+								else{dummyCounter++;}
 								if(rowMatchesCondition(c, row, schemas[structureId]) && isNotPaused ){
-									//printf("row[0] %c\n", row[0]);
+									// printf("row[0] %c\n", row[0]);
+									// 先把结果保存在 enclave 中
 									memcpy(&storage[storageCounter*colChoiceSize], &row[colChoiceOffset], colChoiceSize);
 									storageCounter++;
 								}
 								else{
+									/* 有一个 dummy 的写操作，有些写操作可能无法真实的完成，在enclave满的情况下可能无法完成 */
 									memcpy(dummy, dummy, colChoiceSize);
 									dummyCounter++;
 								}
@@ -2283,6 +2464,7 @@ int selectRows(
 								twiddle = 1;
 							}
 							for(int i = 0; i < ROWS_IN_ENCLAVE; i++){
+								// 再将结果输出到结果表，能观察到的写操作的次数就是结果的大小
 								//printf("%d %d %d\n", i, storageCounter, storage[i*colChoiceSize]);
 								if(i == storageCounter)break;
 								memcpy(&row[twiddle], &storage[i*colChoiceSize], colChoiceSize);
@@ -3280,7 +3462,7 @@ int saveIndexTable(char* tableName, int tableSize){
 		stashScan++;
 	}
 	for(int i = 0; i < logicalSizes[structureId]; i++){
-		ocall_read_block(structureId, i, sizeof(Encrypted_Oram_Bucket), encBucket, MEMORY);
+		ocall_read_block(structureId, i, sizeof(Encrypted_Oram_Bucket), encBucket);
 		if(decryptBlock(encBucket, bucket, obliv_key, TYPE_ORAM) != 0) return 1;
 		ocall_write_file(&bucket[0], sizeof(Oram_Bucket), tableSize);
 	}
@@ -3324,7 +3506,7 @@ int loadIndexTable(int tableSize){
 		//printf("here2 %d %d %d", i, bucket->blocks[0].actualAddr, bucket->blocks[0].data[0]);
 		if(encryptBlock(encBucket, bucket, obliv_key, TYPE_ORAM) != 0) return 1;
 		//printf("here3 %d", i);
-		ocall_write_block(structureId, i, sizeof(Encrypted_Oram_Bucket), encBucket, MEMORY);
+		ocall_write_block(structureId, i, sizeof(Encrypted_Oram_Bucket), encBucket);
 		//printf("here4 %d\n", i);
 	}
 	return 0;

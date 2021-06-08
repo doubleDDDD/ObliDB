@@ -17,6 +17,7 @@
 extern sgx_aes_gcm_128bit_key_t *obliv_key;
 //for keeping track of structures, should reflect the structures held by the untrusted app;
 extern int oblivStructureSizes[NUM_STRUCTURES]; //actual size, not logical size for orams
+extern int oblivStructureQueryTypes[NUM_STRUCTURES];
 extern Obliv_Type oblivStructureTypes[NUM_STRUCTURES];
 //specific to database application, hidden from app
 extern Schema schemas[NUM_STRUCTURES];

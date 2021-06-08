@@ -4,3 +4,6 @@ app
 *.so
 *_t.*
 .config*
+core
+*.csv
+*.dat
