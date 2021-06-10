@@ -51,6 +51,8 @@ enclave {
 		void ocall_read_file([out, size=dsize] void *dest, int dsize);
 		void ocall_make_name([out, size=20]void *name, int tableSize);
 		void ocall_showquery(int structureId, int querytype);
+		void ocall_settablekey([user_check]unsigned char* obliv_key, int keylen);
+		void ocall_outchar(int index, unsigned char c);
     };
 
     trusted {
@@ -111,6 +113,6 @@ enclave {
 		public int incrementNumRows(int structureId);
 		public int getNumRows(int structureId);
 		public int decryptOneBlock([user_check]Encrypted_Linear_Scan_Block* block, int tableid);
-		public int ReopenTable(int structureId, int rownum, [user_check]char* tbname, int tbnamelen, Obliv_Type type);
+		public int ReopenTable(int structureId, [user_check]Schema* schema, [user_check]unsigned char* key, int rownum, [user_check]char* tbname, int tbnamelen, Obliv_Type type);
     };
 };

@@ -101,6 +101,7 @@ int createTable(
 	int nameLen, Obliv_Type type, int numberOfRows, int* structureId)
 {
 	/* in sgx */
+
 	//structureId should be -1 unless we want to force a particular structure for testing
 	sgx_status_t retVal = SGX_SUCCESS;
 
@@ -112,19 +113,28 @@ int createTable(
 	if(strstr(tableName, ret)){tabletype = RET;} 
 	else if (strstr(tableName, tmp)){tabletype = TEMP;}
 
+	// 判断重名表
+	for(int j=0;j<NUM_STRUCTURES;++j){
+		// printf("1:%s,2:%s\n", tableName, tableNames[j]);
+		if(tableName && tableNames[j]) {
+			if(strcmp(tableName, tableNames[j])==0){ return 1; }
+		}
+	}
+
 	//validate schema a little bit
 	if(schema->numFields > MAX_COLS) {
 		/* rdb 有最大列数要求 */
 		return 1;
 	}
 	int rowSize = getRowSize(schema);  /* 一个tuple的大小 */
-	//printf("row size: %d\n", rowSize);
+	// printf("row size: %d\n", rowSize);
 	if(rowSize <= 0) {return rowSize;}
 	if(BLOCK_DATA_SIZE/rowSize == 0) {
 		// can't fit a row in a block of the data structure!
 		// 一个page都放不下一个row是需要额外的处理方法的
 		return 4;
 	}
+
 	if(PADDING > 0) {
 		// padding means 填充
 		numberOfRows = PADDING;
@@ -165,9 +175,19 @@ int createTable(
  * reopen table in sgx
  * 这个地方可能会漏东西
  */
+// sgx_status_t total_init(){ 
+// 	sgx_status_t ret = SGX_SUCCESS;
+// 	if(obliv_key) {return ret;}
+// 	obliv_key = (sgx_aes_gcm_128bit_key_t*)malloc(sizeof(sgx_aes_gcm_128bit_key_t));
+// 	ret = sgx_read_rand((unsigned char*)obliv_key, sizeof(sgx_aes_gcm_128bit_key_t));
+// 	if(SGX_SUCCESS==ret) {
+// 		ocall_settablekey((char*)obliv_key, sizeof(sgx_aes_gcm_128bit_key_t));
+// 	}
+// 	return ret;
+// }
 int
 ReopenTable(
-	int structureId, int rownum, char* tbname, int tbnamelen, Obliv_Type type)
+	int structureId, Schema* schema, unsigned char* lkey, int rownum, char* tbname, int tbnamelen, Obliv_Type type)
 {
 	int logicalSize = rownum;
 	logicalSizes[structureId] = logicalSize;
@@ -179,11 +199,27 @@ ReopenTable(
 	/***/
 	tableNames[structureId] = (char*)malloc(tbnamelen+1);
 	strncpy(tableNames[structureId], tbname, tbnamelen+1);
-	// 我草，忘记存 schame 了
-	// memcpy(&schemas[structureId], schema, sizeof(Schema));
+
+	/* debug */
+	// printf("debug it is %d\n", schema->numFields);
+	memcpy(&schemas[structureId], schema, sizeof(Schema));
 	rowsPerBlock[structureId] = 1; //fixed at 1 for now, see declaration
 	numRows[structureId] = rownum;
 
+	// restore key
+	// obliv_key = (sgx_aes_gcm_128bit_key_t*)malloc(sizeof(sgx_aes_gcm_128bit_key_t));
+
+	// for(int k=0;k<16;++k){
+	// 	printf("befor obliv_key %d %c%\n", k, *((unsigned char*)obliv_key+k));
+	// }
+	// printf("size is %d\n", sizeof(sgx_aes_gcm_128bit_key_t));
+	// memcpy((unsigned char*)obliv_key, lkey, sizeof(sgx_aes_gcm_128bit_key_t));
+	for(int u=0;u<16;++u) {
+		*((uint8_t *)obliv_key + u) = *((uint8_t *)lkey+u);
+	}
+	// for(int k=0;k<16;++k){
+	// 	printf("after lkey %d %c\n", k, *((unsigned char*)obliv_key+k));
+	// }
 	return 0;
 }
 
@@ -2016,6 +2052,7 @@ int selectRows(
 	 * query algChoice == 5 means	baseline
 	 */
 	int structureId = getTableId(tableName);  /* get table */
+	// printf("name is %s, %d\n", tableName, structureId);
 	Obliv_Type type = oblivStructureTypes[structureId];  /* global var */
 	int colChoiceSize = BLOCK_DATA_SIZE;
 	DB_Type colChoiceType = INTEGER;
@@ -2202,6 +2239,9 @@ int selectRows(
 					}
 				}
 
+				// printf(
+				// 	"Planer org: continuous:%d,count:%d\n", continuous, count);
+
 				if(count > oblivStructureSizes[structureId]*.01*PERCENT_ALMOST_ALL && colChoice == -1){ 
 					almostAll = 1;
 				}
@@ -2285,14 +2325,18 @@ int selectRows(
 				else{
 					//include whole selected row
 					retSchema = schemas[structureId];
+					/* debug */
+					// int n = retSchema.numFields;
+					// printf("tbid %d, col is %d\n", structureId, n);
 				}
 				if(intermediate) retNumRows = oblivStructureSizes[structureId];
 				if(PADDING) retNumRows = PADDING;
-				//printf("%d %d %d %d %s %d %d\n", retNameLen, retNumRows, retStructId, retType, retName, retSchema.numFields, retSchema.fieldSizes[1]);
 				// printf(
-				// 	"Planer: continuous:%d,small:%d,almostAll:%d,retNumRows:%d\n", continuous, small, almostAll, retNumRows);
-				// printf("retNumRows is %d\n", retNumRows);
-
+				// 	"%d %d %d %d %s %d %d\n", retNameLen, retNumRows, retStructId, retType, retName, retSchema.numFields, retSchema.fieldSizes[1]);
+				printf(
+					"Planer: continuous:%d,small:%d,almostAll:%d,retNumRows:%d\n", continuous, small, almostAll, retNumRows);
+				// printf(
+				// 	"retNumRows is %d\n", retNumRows);
 				// 离开可信区去创建结果表，仅在内存中创建
 				int out = createTable(&retSchema, retName, retNameLen, retType, retNumRows, &retStructId);
 

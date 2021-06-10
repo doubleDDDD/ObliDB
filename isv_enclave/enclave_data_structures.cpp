@@ -66,11 +66,17 @@ decryptOneBlock(Encrypted_Linear_Scan_Block *block, int tableid)
 
 	memcpy(realEnc, block, sizeof(Encrypted_Linear_Scan_Block));
 
+	/* for debug */
+	// for(int k=0;k<16;++k){
+	// 	printf("re in key %d is %c\n", k, *((unsigned char *)obliv_key+k));
+	// }
 	if(decryptBlock(realEnc, real, obliv_key, TYPE_LINEAR_SCAN) != 0) {
-		return -1;
+		printf("decrypt failure!\n");
+		return 1;
 	}
 
 	// printf("data:%d\n", schemas[tableid].numFields);
+	// printf("mmp %d, table id is %d\n", schemas[tableid].fieldTypes[3], tableid);
 	assert(schemas[tableid].fieldTypes[3]==INTEGER);
 
 	int val;
@@ -152,7 +158,11 @@ int opOneLinearScanBlock(
 		/* out sgx to read */
 		ocall_read_block(structureId, i, encBlockSize, realEnc);
 		//printf("beginning of mac(op)? %d\n", realEnc->macTag[0]);
-		if(decryptBlock(realEnc, real, obliv_key, TYPE_LINEAR_SCAN) != 0) return 1;//printf("here 2\n");
+		if(decryptBlock(realEnc, real, obliv_key, TYPE_LINEAR_SCAN) != 0) {
+			printf("decrypt failure!\n");
+			return 1;
+		}//printf("here 2\n");
+		// printf("data %s\n", real->data);
 
 		// TODO 先试试把这个校验绕过去
 		// if(!MIXED_USE_MODE && real->actualAddr != i && real->actualAddr != -1){
@@ -818,9 +828,29 @@ int getNextId() {
 	return ret;
 }
 
-sgx_status_t total_init(){ //get key
+/**
+ * typedef uint8_t sgx_aes_gcm_128bit_key_t[SGX_AESGCM_KEY_SIZE];
+ * SGX_AESGCM_KEY_SIZE = 16
+ * sizeof 一个数组名，是这个数组所占字节总数
+ */
+sgx_status_t total_init()
+{
+	unsigned char c;
+	sgx_status_t ret = SGX_SUCCESS;
+	// if(obliv_key) { return ret; }
 	obliv_key = (sgx_aes_gcm_128bit_key_t*)malloc(sizeof(sgx_aes_gcm_128bit_key_t));
-	return sgx_read_rand((unsigned char*) obliv_key, sizeof(sgx_aes_gcm_128bit_key_t));
+	// printf("key len is %d\n", sizeof(sgx_aes_gcm_128bit_key_t));
+	ret = sgx_read_rand((unsigned char*)obliv_key, sizeof(sgx_aes_gcm_128bit_key_t));
+	// printf("in key is %s\n", obliv_key);
+	for(int i=0;i<16;++i){
+		c = *((unsigned char* )obliv_key+i);
+		// printf("in char %d of key %c\n", i, c);
+		ocall_outchar(i, c);
+	}
+	// if(SGX_SUCCESS==ret) {
+	// 	ocall_settablekey((unsigned char*)obliv_key, sizeof(sgx_aes_gcm_128bit_key_t));
+	// }
+	return ret;
 }
 
 /**

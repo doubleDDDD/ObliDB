@@ -14,14 +14,16 @@
 #include <cstdlib>
 #include <unordered_map>
 #include <condition_variable>
-#include <mutex>  // 线程互斥体
+#include <mutex>
 #include <climits>
+
+#include "../isv_enclave/definitions.h"//structs, enums, fixed constants
 
 namespace oblidbextraio {
 /***********************/
 
-#define PAGE_SIZE 4096  // 与filesystem IO 一致
-#define BUFFER_POOL_SIZE 32  // 很小，为了保证能够看到效果 16M
+#define PAGE_SIZE 4096  // same with filesystem IO
+#define BUFFER_POOL_SIZE 32
 #define EXTRA_BUCKET_SIZE 8
 #define INVALID_PAGE_ID -1
 #define HEADER_PAGE_ID 0
@@ -529,38 +531,58 @@ private:
  *      table 的 tuple数量
  *      类型
  * 都需要持久化记录
+ * schema 持久化 here, 这么搞一个page放不下几张表的感觉
+ * length of one record
+ *  32 + 4 + 4 + 4 + 4 + 4 + n*12
+ *     52 + n*12 
  *  -----------------------------------------------------------------
- * | RecordCount (4) | Entry_1 name (32) | Entry_1 root_id (4) | Entry_1 EncBlockSize (4) | Entry_1 row_num (4) | Entry_1 type(4) |... |
+ * | RecordCount (4) | curoffset (4) | key valid flag (4) | keylen (4) | secret key (32 bytes) | Entry_1 name (32) | Entry_1 root_id (4) | Entry_1 EncBlockSize (4) | Entry_1 row_num (4) | Entry_1 type(4) |
+ * | numFields (4) | first fieldOffsets(4) | first fieldSizes(4) | first fieldTypes(4) | second fieldOffsets | second fieldSizes | second fieldTypes | ... |
  *  -----------------------------------------------------------------
  */
+#define HEADHEAD 4
+#define ONE_RECORD_FIX_LEN 52
+#define ONE_RECORD_VARIABLE 12
+#define TABLE_NAME_LEN_MAX 32
+#define KEY_VALID_FLAG 4  // 4 字节的有效位
+#define KEY_LEN_FLAG 4  // 4 字节去表示 sgx 秘钥的长度
+#define KEY_LEN_MAX 32  // sgx 秘钥最大 32 字节
+#define BEGIN_OFFSET 2*HEADHEAD + KEY_VALID_FLAG + KEY_LEN_FLAG + KEY_LEN_MAX
 class HeaderPage : public Page {
 public:
-    void Init() { SetRecordCount(0); }
+    void Init() { 
+        /* page 创建时被调用，仅一次 */
+        SetRecordCount(0); 
+        SetResordOffset(BEGIN_OFFSET);
+        SetKeyValidFlag(false);
+    }
 
     /* Record related */
     bool InsertRecord(
-        const std::string &name, 
+        const std::string &name,
+        Schema* schema, 
         const page_id_t root_id,
         int encBlockSize,
         int rownum,
         int type
     )
     {
-        assert(name.length() < 32);
+        // printf("root page id: %d\n", root_id);
+        assert(root_id>0);
+        assert(name.length() < TABLE_NAME_LEN_MAX);
         assert(root_id > INVALID_PAGE_ID);
 
+        int numfileds = schema->numFields;
         int rnum = GetRecordCount();
-        int offset = 4 + rnum * 36;
+        int offset = GetOffset();
 
         /* check if offset is too large */
-        if (PAGE_SIZE - offset < 36) { 
+        if (PAGE_SIZE - offset < ONE_RECORD_FIX_LEN + numfileds*ONE_RECORD_VARIABLE) { 
             return false; 
         }
 
         /* 检查重名 */
-        if (FindRecord(name) != -1){
-            return false;
-        }
+        if (FindRecord(name) != -1) { return false; }
 
         // copy record content
         memcpy(GetData() + offset, name.c_str(), (name.length() + 1));
@@ -568,8 +590,17 @@ public:
         memcpy((GetData() + offset + 36), &encBlockSize, 4);
         memcpy((GetData() + offset + 40), &rownum, 4);
         memcpy((GetData() + offset + 44), &type, 4);
+        memcpy((GetData() + offset + 48), &numfileds, 4);
+
+        for(int i=0;i<numfileds;++i){
+            memcpy((GetData() + offset + 52 + i*12 + 0), &(schema->fieldOffsets[i]), 4);
+            memcpy((GetData() + offset + 52 + i*12 + 4), &(schema->fieldSizes[i]), 4);
+            memcpy((GetData() + offset + 52 + i*12 + 8), &(schema->fieldTypes[i]), 4);
+        }
 
         SetRecordCount(rnum + 1);
+        SetResordOffset(offset + ONE_RECORD_FIX_LEN + numfileds*ONE_RECORD_VARIABLE);
+
         return true;
     }
 
@@ -600,41 +631,104 @@ public:
     // }
 
     // return root_id if success
-    bool GetRootId(const std::string &name, page_id_t &root_id) {
-        assert(name.length() < 32);
+    bool GetRootId(const std::string &name, page_id_t &root_id) 
+    {
+        assert(name.length() < TABLE_NAME_LEN_MAX);
 
-        int index = FindRecord(name);
-        if(index == -1) {return false;}
+        int offset = FindRecord(name);
+        if(offset == -1) { return false; }
 
         /**
          * 0: 4 + 32:           36
          * 1: 4 + 36 + 32:      36*2
          * 2: 4 + 36 + 36 + 32  36*3
+         * deprecated
          */
-        int offset = (index + 1) * 36;
+        // int offset = (index + 1) * 36;
+        offset += TABLE_NAME_LEN_MAX;
         root_id = *reinterpret_cast<page_id_t *>(GetData() + offset);
+        return true;
     }
 
     /* helper functions */
-    int GetRecordCount(){
-        /* GetData的前4个字节，直接 char* 转 int，int 4字节 */
-        return *reinterpret_cast<int *>(GetData());
-    }
-
-    int FindRecord(const std::string &name){
+    int FindRecord(const std::string &name)
+    {
         int i;
         size_t rnum = GetRecordCount();
 
-        for(i=0; i<rnum; ++i){
-            char *raw_name = reinterpret_cast<char *>(GetData() + (4 + i*36));
-            if(strcmp(raw_name, name.c_str())==0) {return i;}
-        }
+        int cursor = BEGIN_OFFSET;
+        int curnumFields;
 
+        for(i=0; i<rnum; ++i){
+            char *raw_name = reinterpret_cast<char *>(GetData()+cursor);
+            if(strcmp(raw_name, name.c_str())==0) {return cursor;}
+            curnumFields = *reinterpret_cast<int *>(GetData() + cursor + 48);
+            cursor += curnumFields*ONE_RECORD_VARIABLE + ONE_RECORD_FIX_LEN;
+        }
         return -1;
     }
+
+    int GetRecordOffset(int index)
+    {
+        int i;
+        size_t rnum = GetRecordCount();
+        int cursor = BEGIN_OFFSET;
+        int curnumFields;
+
+        for(i=0; i<rnum; ++i){
+            if(i==index) { return cursor; }
+            curnumFields = *reinterpret_cast<int *>(GetData() + cursor + 48);
+            cursor += curnumFields*ONE_RECORD_VARIABLE + ONE_RECORD_FIX_LEN;
+        }
+        return -1;
+    }
+
+    int GetRecordCount(){
+        return *reinterpret_cast<int *>(GetData());
+    }
+
+    int GetOffset() {
+        return *reinterpret_cast<int *>(GetData() + HEADHEAD);
+    }
+
+    bool ValidKey(){
+        int v = *reinterpret_cast<int *>(GetData() + 2*HEADHEAD);
+        return static_cast<bool>(v);
+    }
+
+    void GetKey(unsigned char* lkey){
+        // int keylen = *reinterpret_cast<int *>(GetData() + 3*HEADHEAD);
+        for(int y=0;y<16;++y){
+            lkey[y] = \
+                *reinterpret_cast<unsigned char*>(GetData() + 4*HEADHEAD + y);
+        }
+        // return reinterpret_cast<char *>(GetData() + 4*HEADHEAD);
+    }
+
+    void SetKeyValidFlag(bool v){
+        // int vv = static_cast<int>(vv);
+        // printf("value is %d\n", v);
+        memcpy(GetData() + 2*HEADHEAD, &v, 4);
+    }
+
+    // only set once，在有效位无效时 set
+    void SetKey(unsigned char* key, int keysize){
+        /* debug */
+        // for(int i=0;i<16;++i){
+        //     printf("set %d %c\n", i, *(key+i));;
+        // }
+        assert(keysize<=KEY_LEN_MAX);
+        memcpy(GetData() + 3*HEADHEAD ,&keysize, 4);
+        memcpy(GetData() + 4*HEADHEAD, key, keysize);
+    }
+
 private:
     void SetRecordCount(int record_count){
         memcpy(GetData(), &record_count, 4);
+    }
+
+    void SetResordOffset(int offset){
+        memcpy(GetData() + HEADHEAD, &offset, 4);
     }
 };
 
@@ -822,7 +916,6 @@ public:
             return true;
         }
     }
-
 private:
     /**
     * helper functions
@@ -908,6 +1001,7 @@ class DiskManager {
 public:
     DiskManager(const std::string &db_file) : file_name_(db_file), next_page_id_(0)
     {
+        uint64_t pagesize;
         std::string::size_type n = file_name_.find(".");
         if (n == std::string::npos) {
             std::cerr << "wrong file format" << std::endl;
@@ -924,6 +1018,14 @@ public:
             // reopen with original mode
             db_io_.open(db_file, std::ios::binary | std::ios::in | std::ios::out);
         }
+
+        // 计算文件大小
+        pagesize = GetFileSize(db_file);
+        if(pagesize<0) {
+            printf("GG\n");
+            exit(-1);
+        }
+        next_page_id_ = pagesize / PAGE_SIZE;
     };
 
     ~DiskManager() { db_io_.close(); }
@@ -963,6 +1065,9 @@ public:
     };
 
     page_id_t AllocatePage() { return next_page_id_++; }
+    void DeallocateOnePage() {
+        if(next_page_id_>0) { next_page_id_--; }
+    }
     void DeallocatePage(__attribute__((unused)) page_id_t page_id) {return;}
     page_id_t GetPageId() const {return next_page_id_;}
 
@@ -1195,7 +1300,6 @@ public:
         auto first_page =
             static_cast<TablePage *>(buffer_pool_manager->NewPage(first_page_id));
         assert(first_page != nullptr);
-
         first_page->WLatch();
         // init page layout
         first_page->Init(first_page_id, PAGE_SIZE, INVALID_PAGE_ID);
@@ -1346,21 +1450,25 @@ class DBTable
 public:
     DBTable()=default;
 
+    // create
     DBTable(
         BufferPoolManager* _buffer_pool_manager, 
         DiskManager* _disk_manager, 
+        std::string& _tbname,
         int _encBlockSize, int _rownum, int _type, int _cursor):
-        buffer_pool_manager(_buffer_pool_manager), disk_manager(_disk_manager), 
+        buffer_pool_manager(_buffer_pool_manager), disk_manager(_disk_manager), tablename(_tbname),
         encBlockSize(_encBlockSize), rownum(_rownum), type(_type), cursor(_cursor)
     {
         table_heap = new TableHeap(buffer_pool_manager);
     }
 
+    // reopen
     DBTable(
         BufferPoolManager* _buffer_pool_manager, 
         DiskManager* _disk_manager, 
+        std::string& _tbname,
         int _encBlockSize, int _rownum, int _type, int _cursor, page_id_t first_page_id):
-        buffer_pool_manager(_buffer_pool_manager), disk_manager(_disk_manager), 
+        buffer_pool_manager(_buffer_pool_manager), disk_manager(_disk_manager), tablename(_tbname),
         encBlockSize(_encBlockSize), rownum(_rownum), type(_type), cursor(_cursor)
     {
         assert(cursor==rownum);
@@ -1384,7 +1492,10 @@ public:
     int TableSize() const { return rownum; }
     int Cursor() const { return cursor; }
     void IncrementCursor() { cursor++; }
-
+    TableHeap* GetTableHeap() const { return table_heap; }
+    void DeallocateOnePage() { disk_manager->DeallocateOnePage(); }
+    std::string& TableName() { return tablename; }
+    int Type() const { return type; }
 private:
     std::string tablename;
     BufferPoolManager* buffer_pool_manager;
@@ -1392,7 +1503,7 @@ private:
     int encBlockSize;
     int rownum;
     int type;
-    TableHeap *table_heap;  /* table head 几乎是最简单的数据库文件组织方式 */
+    TableHeap* table_heap;  /* table head 几乎是最简单的数据库文件组织方式 */
 
     /* 代表目前准备写位置的下标，每张表只写一次，游标就用一次，init一次，为 real write 准备 */
     int cursor;  

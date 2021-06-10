@@ -83,7 +83,6 @@
 //#define ENCLAVE_PATH "isv_enclave.signed.so"
 #define ENCLAVE_PATH "./isv_enclave.signed.so"
 
-
 //use these to keep track of all the structures and their types (added by me, not part of sample code)
 // 目前的set支持10张表，NUM_STRUCTURES=10，10张表可以都在一个file里搞定
 int oblivStructureSizes[NUM_STRUCTURES] = {0};
@@ -92,7 +91,8 @@ uint8_t* oblivStructures[NUM_STRUCTURES] = {0}; //hold pointers to start of each
 int oblivStructureQueryTypes[NUM_STRUCTURES] = {0};  // 查询类型
 RW_Type oblivStructureStorageTypes[NUM_STRUCTURES] = {MEMORY};  // 存储类型
 
-char *globaltablename;  // 用来暂存tablename的，暂时不支持多线程并发去 access db
+char* globaltablename;  // 用来暂存tablename的，暂时不支持多线程并发去 access db
+Schema* globalschema;  // 同上
 
 // 全局打开表的数组
 oblidbextraio::DBTable* dbtables[NUM_STRUCTURES] = {nullptr};
@@ -106,59 +106,98 @@ uint8_t* attestation_msg_samples[] =
     { attestation_msg_sample1, attestation_msg_sample2};
 
 oblidbextraio::StorageEngine* storageengine = nullptr;
+unsigned char gkey[L_SGX_AESGCM_KEY_SIZE]={0};  /* 用来保存秘钥的 */
 
 // query 对结果表的处理 + 一个回调 用户自行处置
 
 void
 ReOpenDB(oblidbextraio::HeaderPage* header_page, sgx_enclave_id_t enclave_id, int status)
 {
-	int recordcn, i;
+	int i, pre_offset;
 
-	recordcn = header_page->GetRecordCount();
+	unsigned char lkey[16];
+	int recordcn = header_page->GetRecordCount();
+	int cur_offset = header_page->GetOffset();
+    bool validkey = header_page->ValidKey();
+	header_page->GetKey(lkey);
+	// std::string _key(key);
+
 	std::cout 
-		<< "record count: " << recordcn << std::endl;
+		<< "record count:" << recordcn 
+		<< ",current offset:" << cur_offset 
+		<< ",validkey:" << validkey << std::endl;
+	
+	// for(int j=0;j<16;++j){
+	// 	printf("last %c\n", lkey[j]);
+	// }
 
-	// table 的 index 就认为是在 head_page 中的序列
+	// update with schema
 	for(i=0;i<recordcn;++i)
 	{
-		int offset = 4 + i * 36;
+		int offset = header_page->GetRecordOffset(i);
+		assert(offset != -1);
 		char *raw_name = reinterpret_cast<char *>(header_page->GetData() + offset);
 		int32_t rootpage = *reinterpret_cast<int32_t *>(header_page->GetData() + offset + 32);
         std::string tbname(raw_name);
 		int encBlockSize = *reinterpret_cast<int *>(header_page->GetData() + offset + 36);
 		int rownum = *reinterpret_cast<int *>(header_page->GetData() + offset + 40);
 		int type = *reinterpret_cast<int *>(header_page->GetData() + offset + 44);
+		int numFields = *reinterpret_cast<int *>(header_page->GetData() + offset + 48);
 
 		std::cout
-			<< "index: " << i
-			<< ",table name: " << tbname 
-			<< ",root page id: " << rootpage 
-			<< ",encblocksize: " << encBlockSize
-			<< ",row num: " << rownum
-			<< ",type: " << type << std::endl;
+			<< "index:" << i
+			<< ",table name:" << tbname 
+			<< ",root page id:" << rootpage 
+			<< ",encblocksize:" << encBlockSize
+			<< ",row num:" << rownum
+			<< ",type:" << type 
+			<< ",numFields:" << numFields << std::endl;
+
+		// offset += 48;
+		Schema schema;
+		schema.numFields = numFields;
+		for(int j=0;j<numFields;++j){
+			schema.fieldOffsets[j] = \
+				*reinterpret_cast<int *>(header_page->GetData() + offset + 52 + j*12 + 0);
+			schema.fieldSizes[j] = \
+				*reinterpret_cast<int *>(header_page->GetData() + offset + 52 + j*12 + 4);
+			schema.fieldTypes[j] = \
+				static_cast<DB_Type>(*reinterpret_cast<int *>(header_page->GetData() + offset + 52 + j*12 + 8));
+			
+			std::cout 
+				<< "index:" << j
+				<< ",offset:" << schema.fieldOffsets[j] 
+				<< ",size:" << schema.fieldSizes[j] 
+				<< ",type:" << schema.fieldTypes[j] << std::endl;
+		}
 
 		/**
-		 * 恢复 table 在内存中的数据结构
-		 * 游标按照最大去 set
+		 * 恢复 table 在内存中的数据结构, 游标按照最大去 set
 		 */
 		assert(dbtables[i]==nullptr);
 		dbtables[i] = new oblidbextraio::DBTable(
 			storageengine->buffer_pool_manager_, 
 			storageengine->disk_manager_, 
+			tbname,
 			encBlockSize, 
 			rownum, 
 			type, 
 			rownum, rootpage);
 		
 		oblivStructureSizes[i] = rownum;
-    	oblivStructureTypes[i] = type;
+		oblivStructureTypes[i] = type;
+		oblivStructureStorageTypes[i] = DISK;
 
 		Obliv_Type _type = static_cast<Obliv_Type>(type);
 		char* _tbname = const_cast<char *>(tbname.c_str());
+
+		// set sgx key
 		ReopenTable(
 			enclave_id, 
 			(int*)&status, 
 			i,
+			&schema,
+			lkey,
 			rownum, 
 			_tbname, 
 			tbname.length(), 
@@ -190,6 +229,14 @@ ConnectDB(sgx_enclave_id_t enclave_id, int status)
         assert(header_page_id == HEADER_PAGE_ID);
         header_page->WLatch();
         header_page->Init();
+
+		assert(gkey);
+		if(!header_page->ValidKey()){
+			header_page->SetKey(gkey, L_SGX_AESGCM_KEY_SIZE);
+			header_page->SetKeyValidFlag(true);
+			storageengine->buffer_pool_manager_->UnpinPage(HEADER_PAGE_ID, true);
+		}
+
         storageengine->buffer_pool_manager_->UnpinPage(header_page_id, true);  /* 虽然没有任何写操作，但是必须dirty */
         header_page->WUnlatch();
     } else {
@@ -204,6 +251,42 @@ ConnectDB(sgx_enclave_id_t enclave_id, int status)
 		// 要把 app 与 sgx 中的一些全局的数据结构恢复
 		ReOpenDB(header_page, enclave_id, status);
 	}
+}
+
+void
+ocall_settablekey(
+	unsigned char* obliv_key, int keylen)
+{
+    // assert(storageengine);
+    auto header_page =
+        static_cast<oblidbextraio::HeaderPage *>(storageengine->buffer_pool_manager_->FetchPage(HEADER_PAGE_ID));
+    if(!header_page){ return; }
+
+	// char keycontainer[16];
+	// memcpy(keycontainer, obliv_key, keylen);
+	// printf("out key is %s, validkey: %d\n", keycontainer, header_page->ValidKey());
+	// printf("key is %s\n", obliv_key);  // can not access memory in sgx
+
+	assert(gkey);
+	header_page->WLatch();
+	// try set sgx, 如果是 reopen 的，这里直接 pass
+	if(!header_page->ValidKey()){
+		header_page->SetKey(gkey, keylen);
+		header_page->SetKeyValidFlag(true);
+		storageengine->buffer_pool_manager_->UnpinPage(HEADER_PAGE_ID, true);
+	}
+    header_page->WUnlatch();
+
+	return;
+}
+
+void
+ocall_outchar(int index, unsigned char c)
+{
+	// printf("out char %d of key %c\n", index, c);
+	gkey[index] = c;
+	// printf("final %s\n", gkey);
+	return;
 }
 
 void
@@ -366,16 +449,34 @@ ocall_read_block(
 		return;
 	}
 
+	if(dbtables[structureId]){
+		// read disk table
+		assert(dbtables[structureId]);
+		assert(storageengine);
+
+		oblidbextraio::DBTable* table = dbtables[structureId];
+		// printf("structureId is %d\n", structureId);
+		// RW_Type storagetype = static_cast<RW_Type>(table->Type());
+		oblidbextraio::Tuple tuple;
+		if(!table->GetTuple(tuple, index)){
+			std::cerr << "Read disk table failure!" << std::endl;
+			exit(-1);
+		}
+		// std::cout << tuple.GetData() << std::endl;
+		assert(blockSize==tuple.GetSize());
+		memcpy(buffer, tuple.GetData(), blockSize);	
+	} else {
+		// read memory table
+		memcpy(
+			buffer, oblivStructures[structureId]+((long)index*blockSize), blockSize);
+	}
+
+	return;
 	//printf("heer\n");fflush(stdout);
 	//printf("index: %d, blockSize: %d structureId: %d\n", index, blockSize, structureId);
 	//printf("start %d, addr: %d, expGap: %d\n", oblivStructures[structureId], oblivStructures[structureId]+index*blockSize, index*blockSize);fflush(stdout);
-	
 	//printf("beginning of mac(app)? %d\n", ((Encrypted_Linear_Scan_Block*)(oblivStructures[structureId]+(index*encBlockSize)))->macTag[0]);
 	//printf("beginning of mac(buf)? %d\n", ((Encrypted_Linear_Scan_Block*)(buffer))->macTag[0]);
-
-	// 纯内存数据库 memcpy 就 ok
-	memcpy(
-		buffer, oblivStructures[structureId]+((long)index*blockSize), blockSize);//printf("heer\n");fflush(stdout);
 }
 
 /**
@@ -471,6 +572,7 @@ void
 newStructureinperist(int newId, Obliv_Type type, int rownum)
 {
     assert(storageengine);
+	// printf("Create new table:%d,row num:%d\n", newId, rownum);
 
 	int encBlockSize = getEncBlockSize(type);
     if(type == TYPE_ORAM || type == TYPE_TREE_ORAM) {
@@ -490,21 +592,27 @@ newStructureinperist(int newId, Obliv_Type type, int rownum)
         CloseDB();
         exit(-1);
     }
-
-	// 创建 tuple head file，创建 teble 对象，table 对象会创建 tuple head file
-	// 会调用 disk manager 创建该 table 的第一个page
+	
+	std::string tbname(globaltablename);
 	dbtables[newId] = new oblidbextraio::DBTable(
-		storageengine->buffer_pool_manager_, 
-		storageengine->disk_manager_, encBlockSize, rownum, type, 0);
+		storageengine->buffer_pool_manager_,
+		storageengine->disk_manager_, tbname, encBlockSize, rownum, type, 0);
+	
+	oblidbextraio::DBTable* p = dbtables[newId];
+	oblidbextraio::TableHeap* thp = p->GetTableHeap();
+	oblidbextraio::page_id_t first_page_id = thp->GetFirstPageId();
+	// printf("get new root id:%d\n", first_page_id);
 
     header_page->WLatch();
 
-	std::string tbname(globaltablename);
     // insert table header
-    if (!header_page->InsertRecord(tbname, newId, encBlockSize, rownum, (int)type)){
+    if (!header_page->InsertRecord(
+		tbname, globalschema, first_page_id, encBlockSize, rownum, (int)type))
+	{
         std::cerr << "insert failure!" << std::endl;
         header_page->WUnlatch();
-		delete dbtables[newId];
+		// p->DeallocateOnePage(); 复杂，在 sgx 中判断重名
+		delete p;
         CloseDB();
         exit(-1);
     }
@@ -520,18 +628,19 @@ newStructureinperist(int newId, Obliv_Type type, int rownum)
  * int oblivStructureStorageTypes[NUM_STRUCTURES] = {MEMORY};  // 存储类型
  */
 void
-ocall_newStructure(int newId, Obliv_Type type, int size, TABLE_TYPE tableType)
-{
-    // tableType = TEMP;  // 临时的，disk表现在还不支持
-
+ocall_newStructure(
+	int newId, Obliv_Type type, int size, TABLE_TYPE tableType)
+{	
     switch (tableType)
     {
     case RET:
     case TEMP:
+		printf("Create new memory table:%d,row num:%d\n", newId, size);
         newStructureinmemory(newId, type, size);
 		oblivStructureStorageTypes[newId] = MEMORY;
         break;
     default:
+		printf("Create new disk table:%d,row num:%d\n", newId, size);
         newStructureinperist(newId, type, size);
 		oblivStructureStorageTypes[newId] = DISK;
         break;
@@ -593,17 +702,96 @@ void ocall_read_file(void *dest, int dsize){
 	//printf("this funciton prints %d with %d bytes\n", t, dsize);
 }
 
+void
+QueryFinishCallback(sgx_enclave_id_t enclave_id, int status)
+{
+	int i;
+	// oblivStructureStorageTypes[newId] = MEMORY;
+	for(i=0;i<NUM_STRUCTURES;++i){
+		if(oblivStructureStorageTypes[i]==MEMORY) { break; }
+	}
+	// printf("ret table is %d\n", i);
+	int rownum = oblivStructureSizes[i];
+	uint8_t* addr = oblivStructures[i];
+	Obliv_Type type = static_cast<Obliv_Type>(oblivStructureTypes[i]);
+	size_t ATK_BLOCK_SIZE = getEncBlockSize(type);
+	/* 唯一的一张 memory 表就是我们当前的结果 */
+	// user logic to ret table
+
+	// for example
+	// print
+	for(int j=0;j<rownum;++j){
+		decryptOneBlock(
+			enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)(addr + j*ATK_BLOCK_SIZE), j);
+	}
+
+	// to disk
+
+	return;
+}
+
+void
+QueryFinish(
+	char* tbname, 
+	sgx_enclave_id_t enclave_id, int status, 
+	void (*QueryCallback)(sgx_enclave_id_t, int))
+{
+	QueryCallback(enclave_id, status);
+	return;
+}
 
 /**
  *****************************
  */
 /**
+ * just an example
+ */
+void
+SelectTable(sgx_enclave_id_t enclave_id, int status)
+{
+	// CrackTables(enclave_id, status);
+	// return;
+	// oblidbextraio::DBTable* dbtables[NUM_STRUCTURES] = {nullptr};
+	int i;
+	std::string tbname;
+	for(i=0;i<NUM_STRUCTURES;++i){
+		if(!dbtables[i]) { continue; }
+		oblidbextraio::DBTable* p = dbtables[i];
+		tbname = p->TableName();
+		std::cout << tbname << std::endl;
+	}
+
+	char* name = const_cast<char *>(tbname.c_str());
+	int low = 10, high = 13, lower = 9, higher = 14;
+
+    Condition cond;
+    cond.numClauses = 2;
+    cond.fieldNums[0] = 3;
+    cond.fieldNums[1] = 3;
+    cond.conditionType[0] = 1;  // 1 means larger
+    cond.conditionType[1] = -1;  // -1 means less than
+    cond.values[0] = (uint8_t*)&lower;
+    cond.values[1] = (uint8_t*)&higher;
+    cond.nextCondition = NULL;
+
+    selectRows(
+        enclave_id, 
+        (int*)&status, 
+        name, -1, cond, -1, -1, 1, 0); //continuous
+	// 结果表已经写完了，select后面直接带一个函数算了，模拟一下回调
+	QueryFinish(name, enclave_id, status, QueryFinishCallback);
+
+    printf("Query over!\n");
+	return;
+}
+
+/**
  * db open
  */
 void
-OpenDB(sgx_enclave_id_t enclave_id, int status)
+OpenDB1thTable(sgx_enclave_id_t enclave_id, int status)
 {
-	return;
+	return;  // for test
 
 	uint8_t* row = (uint8_t*)malloc(BLOCK_DATA_SIZE);
 	int structureId1 = -1;
@@ -624,10 +812,19 @@ OpenDB(sgx_enclave_id_t enclave_id, int status)
 	rankingsSchema.fieldSizes[3] = 4;
 	rankingsSchema.fieldTypes[3] = INTEGER;
 
-	int rowline = 36;
+	if(rankingsSchema.numFields>NUM_STRUCTURES){
+		printf("too mant fileds in table\n");
+		exit(-1);
+	}
 
+	int rowline = 36;
     char* tableName = "testdbowc"; // open write close
+	if(strlen(tableName)>=TABLE_NAME_LEN_MAX){
+		printf("table name is too long\n");
+		exit(-1);
+	}
 	globaltablename = tableName;
+	globalschema = &rankingsSchema;
 
     createTable(
         enclave_id, 
@@ -639,6 +836,9 @@ OpenDB(sgx_enclave_id_t enclave_id, int status)
         rowline,
         &structureId1
     );
+
+	globaltablename = nullptr;
+	globalschema = nullptr;
 
 	std::ifstream file("orderd.csv");
 	char line[BLOCK_DATA_SIZE];//make this big just in case
@@ -682,6 +882,89 @@ OpenDB(sgx_enclave_id_t enclave_id, int status)
 	 * 暴力读取并解密
 	 */
 	CrackTables(enclave_id, status);
+	return;
+}
+
+void
+PersistExample(sgx_enclave_id_t enclave_id, int status)
+{
+	return;
+	// 开第二张表测试一下
+	uint8_t* row = (uint8_t*)malloc(BLOCK_DATA_SIZE);
+	int tableid = -1;
+
+    // 把表创建出来
+	Schema rankingsSchema;
+	rankingsSchema.numFields = 4;
+	rankingsSchema.fieldOffsets[0] = 0;
+	rankingsSchema.fieldSizes[0] = 1;
+	rankingsSchema.fieldTypes[0] = CHAR;
+	rankingsSchema.fieldOffsets[1] = 1;
+	rankingsSchema.fieldSizes[1] = 255;
+	rankingsSchema.fieldTypes[1] = TINYTEXT;
+	rankingsSchema.fieldOffsets[2] = 256;
+	rankingsSchema.fieldSizes[2] = 4;
+	rankingsSchema.fieldTypes[2] = INTEGER;
+	rankingsSchema.fieldOffsets[3] = 260;
+	rankingsSchema.fieldSizes[3] = 4;
+	rankingsSchema.fieldTypes[3] = INTEGER;
+
+	if(rankingsSchema.numFields>NUM_STRUCTURES){
+		printf("too mant fileds in table\n");
+		exit(-1);
+	}
+
+	int rowline = 88;
+    char* tableName = "test2th"; // open write close
+	if(strlen(tableName)>=TABLE_NAME_LEN_MAX){
+		printf("table name is too long\n");
+		exit(-1);
+	}
+	globaltablename = tableName;
+	globalschema = &rankingsSchema;
+
+    createTable(
+        enclave_id, 
+        (int*)&status, 
+        &rankingsSchema, 
+        tableName, 
+        strlen(tableName), 
+        TYPE_LINEAR_SCAN, 
+        rowline,
+        &tableid
+    );
+
+	globaltablename = nullptr;
+	globalschema = nullptr;
+
+	std::ifstream file("orderd.csv");
+	char line[BLOCK_DATA_SIZE];
+	char data[BLOCK_DATA_SIZE];
+	row[0] = 'a';
+	for(int i = 0; i < rowline; i++){
+		memset(row, 'a', BLOCK_DATA_SIZE);
+		file.getline(line, BLOCK_DATA_SIZE);
+
+		std::istringstream ss(line);
+		for(int j = 0; j < 3; j++){
+			if(!ss.getline(data, BLOCK_DATA_SIZE, ',')){break;}
+			if(j == 1 || j == 2){
+				int d = 0;
+				d = atoi(data);
+				memcpy(&row[rankingsSchema.fieldOffsets[j+1]], &d, 4);
+			}
+			else{
+				strncpy((char*)&row[rankingsSchema.fieldOffsets[j+1]], data, strlen(data)+1);
+			}
+		}
+
+		opOneLinearScanBlock(enclave_id, (int*)&status, tableid, i, (Linear_Scan_Block*)row, 1);
+		incrementNumRows(enclave_id, (int*)&status, tableid);
+	}
+	printf("Created 2th table\n");
+
+	storageengine->buffer_pool_manager_->FlushAllDirtyPage();
+
 	return;
 }
 
@@ -4323,9 +4606,6 @@ int main(int argc, char* argv[])
         fprintf(OUTPUT, "\nRemote attestation success!\n");
     }
 
-    /* connect to db */
-    ConnectDB(enclave_id, status);
-
     //TODO: My untrusted application code goes here
     /*
      *
@@ -4353,6 +4633,13 @@ int main(int argc, char* argv[])
         	goto CLEANUP;
         }
 
+		/**
+		 * connect to db
+		 * 考虑一下执行顺序，只有reopen需要去换
+		 * 而不是在 reopn 的过程中自行在 sgx 的堆上 malloc
+		 */
+    	ConnectDB(enclave_id, status);
+
     	//trigger oram initialization
     	ra_samp_response_header_t *oramInitMsg_resp = NULL;
         ra_samp_request_header_t* p_oramInitMsg = (ra_samp_request_header_t*) malloc(sizeof(ra_samp_request_header_t));
@@ -4379,11 +4666,11 @@ int main(int argc, char* argv[])
         unsigned int *oramCapacity = (unsigned int*)malloc(sizeof(int));
         memcpy(oramCapacity, oramInitMsg_resp->body, sizeof(int));
 
-
         //real world query tests
         //PICK EXPERIMENT TO RUN HERE
-
-		// OpenDB(enclave_id, status);
+		OpenDB1thTable(enclave_id, status);
+		SelectTable(enclave_id, status);
+		// PersistExample(enclave_id, status);
 		// DBContinueAT(enclave_id, status);
         //nasdaqTables(enclave_id, status); //2048	
         //complaintTables(enclave_id, status); //4096	
