@@ -290,9 +290,15 @@ ocall_outchar(int index, unsigned char c)
 }
 
 void
-CloseDB(){
-    storageengine->buffer_pool_manager_->FlushAllDirtyPage();
-    delete storageengine;
+CloseDB()
+{
+	for(int u=0;u<NUM_STRUCTURES;++u){
+		if(!dbtables[u]) { continue; }
+		delete dbtables[u];
+	}
+
+	storageengine->buffer_pool_manager_->FlushAllDirtyPage();
+	delete storageengine;
 }
 
 void
@@ -761,6 +767,7 @@ SelectTable(sgx_enclave_id_t enclave_id, int status)
 		std::cout << tbname << std::endl;
 	}
 
+	// 总共有几个 88
 	char* name = const_cast<char *>(tbname.c_str());
 	int low = 10, high = 13, lower = 9, higher = 14;
 
@@ -937,15 +944,15 @@ PersistExample(sgx_enclave_id_t enclave_id, int status)
 	globaltablename = nullptr;
 	globalschema = nullptr;
 
-	std::ifstream file("orderd.csv");
+	std::ifstream file("orderd.csv");  // 输入文件流对象 file, input file
 	char line[BLOCK_DATA_SIZE];
 	char data[BLOCK_DATA_SIZE];
 	row[0] = 'a';
 	for(int i = 0; i < rowline; i++){
 		memset(row, 'a', BLOCK_DATA_SIZE);
-		file.getline(line, BLOCK_DATA_SIZE);
+		file.getline(line, BLOCK_DATA_SIZE);  // 从文件流中读取 512 字节内容，读够511个字符 或 遇到 \n 提前结束，这里基本都读到 \n 然后提前结束了
 
-		std::istringstream ss(line);
+		std::istringstream ss(line);  // 再把 line 变成一个字符串流 同样是 input 流
 		for(int j = 0; j < 3; j++){
 			if(!ss.getline(data, BLOCK_DATA_SIZE, ',')){break;}
 			if(j == 1 || j == 2){
@@ -4668,7 +4675,7 @@ int main(int argc, char* argv[])
 
         //real world query tests
         //PICK EXPERIMENT TO RUN HERE
-		OpenDB1thTable(enclave_id, status);
+		// OpenDB1thTable(enclave_id, status);
 		SelectTable(enclave_id, status);
 		// PersistExample(enclave_id, status);
 		// DBContinueAT(enclave_id, status);
@@ -5183,8 +5190,7 @@ CLEANUP:
 
     sgx_destroy_enclave(enclave_id);
 
-	storageengine->buffer_pool_manager_->FlushAllDirtyPage();
-	delete storageengine;
+	CloseDB();
 
     //todo(Saba): need to free stuff that I used in the code I added
     /*moved up

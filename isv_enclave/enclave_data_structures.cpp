@@ -85,7 +85,7 @@ decryptOneBlock(Encrypted_Linear_Scan_Block *block, int tableid)
 	int _revNum  = real->revNum;
 	memcpy(&val, &row[schemas[tableid].fieldOffsets[3]], 4);
 	printf(
-		"%d: data:%s,addr:%d,revNum:%d,num:%d\n", tableid, real->data, _actualAddr, _revNum, val);
+		"%d: data:%s,addr:%d,revNum:%d,val:%d\n", tableid, real->data, _actualAddr, _revNum, val);
 	return 0;
 }
 
