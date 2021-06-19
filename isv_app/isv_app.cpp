@@ -728,7 +728,7 @@ QueryFinishCallback(sgx_enclave_id_t enclave_id, int status)
 	// print
 	for(int j=0;j<rownum;++j){
 		decryptOneBlock(
-			enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)(addr + j*ATK_BLOCK_SIZE), j);
+			enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)(addr + j*ATK_BLOCK_SIZE), i);
 	}
 
 	// to disk

@@ -83,6 +83,8 @@ decryptOneBlock(Encrypted_Linear_Scan_Block *block, int tableid)
 	uint8_t* row = real->data;
 	int _actualAddr = real->actualAddr;
 	int _revNum  = real->revNum;
+	// int voffset = schemas[tableid].fieldOffsets[3];
+	// printf("table id is %d, v offset id %d\n", tableid, voffset);
 	memcpy(&val, &row[schemas[tableid].fieldOffsets[3]], 4);
 	printf(
 		"%d: data:%s,addr:%d,revNum:%d,val:%d\n", tableid, real->data, _actualAddr, _revNum, val);
