@@ -2315,6 +2315,8 @@ int selectRows(
 				if(colChoice != -1){ 
 					// include selected col only
 					// if colChoice == -1 means all
+					// 返回表的 schema 是发生了变化的
+					// printf("wtf\n");
 					retSchema.numFields = 2;
 					retSchema.fieldOffsets[0] = 0;
 					retSchema.fieldOffsets[1] = 1;
@@ -2596,7 +2598,10 @@ int selectRows(
 				}
 
 			}
-			else{//doing an aggregate with no group byprintf("here %d", structureId);
+			else{
+				// 有聚合但是没有 group by
+				// aggregate = 0 count, 1 sum, 2 min, 3 max, 4 mean
+				//doing an aggregate with no group byprintf("here %d", structureId);
 				//query plan gives away that there's only one row to return, so padding doesn't hide anything extra
 
 				int baseline=0, baselineId=-1;

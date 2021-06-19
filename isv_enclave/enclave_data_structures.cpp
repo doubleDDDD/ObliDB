@@ -59,6 +59,10 @@ int freeBlock(int structureId, int blockNum){
 int
 decryptOneBlock(Encrypted_Linear_Scan_Block *block, int tableid)
 {
+	// printf("table id:%d, numfields:%d\n", tableid, schemas[tableid].numFields);
+
+	int numFields = schemas[tableid].numFields;
+
 	Real_Linear_Scan_Block* real = \
 		(Real_Linear_Scan_Block*)malloc(sizeof(Real_Linear_Scan_Block));
 	Encrypted_Linear_Scan_Block* realEnc = \
@@ -77,7 +81,7 @@ decryptOneBlock(Encrypted_Linear_Scan_Block *block, int tableid)
 
 	// printf("data:%d\n", schemas[tableid].numFields);
 	// printf("mmp %d, table id is %d\n", schemas[tableid].fieldTypes[3], tableid);
-	assert(schemas[tableid].fieldTypes[3]==INTEGER);
+	// assert(schemas[tableid].fieldTypes[3]==INTEGER);
 
 	int val;
 	uint8_t* row = real->data;
@@ -85,9 +89,34 @@ decryptOneBlock(Encrypted_Linear_Scan_Block *block, int tableid)
 	int _revNum  = real->revNum;
 	// int voffset = schemas[tableid].fieldOffsets[3];
 	// printf("table id is %d, v offset id %d\n", tableid, voffset);
-	memcpy(&val, &row[schemas[tableid].fieldOffsets[3]], 4);
-	printf(
-		"%d: data:%s,addr:%d,revNum:%d,val:%d\n", tableid, real->data, _actualAddr, _revNum, val);
+	
+	int _int;
+	char _char;
+	char *_text;
+
+	// printf("table id: %d\n", tableid);
+	for(int ii=0;ii<numFields;++ii){
+		DB_Type _type = schemas[tableid].fieldTypes[ii];
+		switch (_type)
+		{
+		case INTEGER:
+			memcpy(&_int, &row[schemas[tableid].fieldOffsets[ii]], 4);
+			printf("offset:%d,val:%d\n", schemas[tableid].fieldOffsets[ii], _int);
+			break;
+		case TINYTEXT:
+			_text = (char *)&row[schemas[tableid].fieldOffsets[ii]];
+			printf("offset:%d,val:%s\n", schemas[tableid].fieldOffsets[ii], _text);
+			break;
+		default:
+			/* CHAR */
+			_char = row[schemas[tableid].fieldOffsets[ii]];
+			printf("offset:%d,val:%c\n", schemas[tableid].fieldOffsets[ii], _char);
+			break;
+		}
+	}
+	// memcpy(&val, &row[schemas[tableid].fieldOffsets[3]], 4);
+	// printf(
+	// 	"%d: data:%s,addr:%d,revNum:%d,val:%d\n", tableid, real->data, _actualAddr, _revNum, val);
 	return 0;
 }
 

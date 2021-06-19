@@ -555,6 +555,9 @@ void ocall_respond( uint8_t* message, size_t message_size, uint8_t* gcm_mac){
 	printf("ocall response\n");
 }
 
+/**
+ * 返回表的 schema 是没有给到外面的
+ */
 void newStructureinmemory(int newId, Obliv_Type type, int size)
 {
     // printf("app: %d initializing structure type %d of capacity %d blocks\n", newId, type, size);
@@ -781,10 +784,16 @@ SelectTable(sgx_enclave_id_t enclave_id, int status)
     cond.values[1] = (uint8_t*)&higher;
     cond.nextCondition = NULL;
 
+    // selectRows(
+    //     enclave_id, 
+    //     (int*)&status, 
+    //     name, -1, cond, -1, -1, 1, 0); //continuous
+
     selectRows(
         enclave_id, 
         (int*)&status, 
-        name, -1, cond, -1, -1, 1, 0); //continuous
+        name, 3, cond, 0, -1, 1, 0); //continuous
+
 	// 结果表已经写完了，select后面直接带一个函数算了，模拟一下回调
 	QueryFinish(name, enclave_id, status, QueryFinishCallback);
 
