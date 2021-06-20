@@ -182,7 +182,7 @@ ReOpenDB(oblidbextraio::HeaderPage* header_page, sgx_enclave_id_t enclave_id, in
 			encBlockSize, 
 			rownum, 
 			type, 
-			rownum, rootpage);
+			rownum, rootpage, &schema);
 		
 		oblivStructureSizes[i] = rownum;
 		oblivStructureTypes[i] = type;
@@ -449,6 +449,8 @@ void
 ocall_read_block(
     int structureId, int index, int blockSize, void *buffer)
 {
+	// std::printf("id is: %d\n", structureId);
+
 	//read in to buffer
 	if(blockSize == 0){
 		printf("unkown oblivious data type\n");
@@ -605,8 +607,9 @@ newStructureinperist(int newId, Obliv_Type type, int rownum)
 	std::string tbname(globaltablename);
 	dbtables[newId] = new oblidbextraio::DBTable(
 		storageengine->buffer_pool_manager_,
-		storageengine->disk_manager_, tbname, encBlockSize, rownum, type, 0);
-	
+		storageengine->disk_manager_, tbname, 
+		encBlockSize, rownum, type, 0, globalschema);
+
 	oblidbextraio::DBTable* p = dbtables[newId];
 	oblidbextraio::TableHeap* thp = p->GetTableHeap();
 	oblidbextraio::page_id_t first_page_id = thp->GetFirstPageId();
@@ -711,18 +714,34 @@ void ocall_read_file(void *dest, int dsize){
 	//printf("this funciton prints %d with %d bytes\n", t, dsize);
 }
 
+/**
+ * sgx 之外 table id
+ */
+int
+GetNextIdOutSgx() {
+	int ret = -1;
+	for(int i = 0; i < NUM_STRUCTURES; i++){
+		if(oblivStructureSizes[i] == 0) {
+			return i;
+		}
+	}
+	return ret;
+}
+
 void
 QueryFinishCallback(sgx_enclave_id_t enclave_id, int status)
 {
-	int i;
 	// oblivStructureStorageTypes[newId] = MEMORY;
-	for(i=0;i<NUM_STRUCTURES;++i){
-		if(oblivStructureStorageTypes[i]==MEMORY) { break; }
-	}
+	// for(i=0;i<NUM_STRUCTURES;++i){
+	// 	if(oblivStructureStorageTypes[i]==MEMORY) { break; }
+	// }
+	// 在搞一个内存表的时候，这个就不适用了
+	int retid = GetNextIdOutSgx()-1;
+
 	// printf("ret table is %d\n", i);
-	int rownum = oblivStructureSizes[i];
-	uint8_t* addr = oblivStructures[i];
-	Obliv_Type type = static_cast<Obliv_Type>(oblivStructureTypes[i]);
+	int rownum = oblivStructureSizes[retid];
+	uint8_t* addr = oblivStructures[retid];
+	Obliv_Type type = static_cast<Obliv_Type>(oblivStructureTypes[retid]);
 	size_t ATK_BLOCK_SIZE = getEncBlockSize(type);
 	/* 唯一的一张 memory 表就是我们当前的结果 */
 	// user logic to ret table
@@ -731,7 +750,7 @@ QueryFinishCallback(sgx_enclave_id_t enclave_id, int status)
 	// print
 	for(int j=0;j<rownum;++j){
 		decryptOneBlock(
-			enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)(addr + j*ATK_BLOCK_SIZE), i);
+			enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)(addr + j*ATK_BLOCK_SIZE), retid);
 	}
 
 	// to disk
@@ -784,15 +803,15 @@ SelectTable(sgx_enclave_id_t enclave_id, int status)
     cond.values[1] = (uint8_t*)&higher;
     cond.nextCondition = NULL;
 
-    // selectRows(
-    //     enclave_id, 
-    //     (int*)&status, 
-    //     name, -1, cond, -1, -1, 1, 0); //continuous
-
     selectRows(
         enclave_id, 
         (int*)&status, 
-        name, 3, cond, 0, -1, 1, 0); //continuous
+        name, -1, cond, -1, -1, 1, 0); //continuous
+
+    // selectRows(
+    //     enclave_id, 
+    //     (int*)&status, 
+    //     name, 3, cond, 0, -1, 1, 0); //continuous
 
 	// 结果表已经写完了，select后面直接带一个函数算了，模拟一下回调
 	QueryFinish(name, enclave_id, status, QueryFinishCallback);
@@ -984,8 +1003,165 @@ PersistExample(sgx_enclave_id_t enclave_id, int status)
 	return;
 }
 
+void 
+PureContinueAT(sgx_enclave_id_t enclave_id, int status)
+{
+	int i;
+	std::string tbname;
+	std::string tar = "test2th"; // 类型转换的构造函数
+	for(i=0;i<NUM_STRUCTURES;++i){
+		if(!dbtables[i]) { continue; }
+		oblidbextraio::DBTable* p = dbtables[i];
+		tbname = p->TableName();
+		// s1.compare(s2)
+		if(!tbname.compare(tar)){
+			break;
+		}
+		// std::cout << tbname << std::endl;
+	}
+
+	int tableid = i;
+	oblidbextraio::DBTable* targettable = dbtables[i];
+	int orgrownum = targettable->TableSize();
+	Schema* _schame = targettable->GetSchema();
+
+	// std::cout << "name is: " << tbname << std::endl;
+	// 总共有几个 88
+	char* name = const_cast<char *>(tbname.c_str());
+	int low = 10, high = 13, lower = 9, higher = 14;
+
+	/**
+	 * 1. 首先，有一个持久性的数据库表，select * 操作可以得到一个内存数据库表全部
+	 * 2. 根据这个完成的内存数据库表（return表）reorderd之后再去 sgx 中创建对应的表
+	 * 3. 这样，就有了原表与乱序表，就可以分别对他们做 select 的聚合操作
+	 */
+	Obliv_Type _type = static_cast<Obliv_Type>(oblivStructureTypes[tableid]);
+	size_t ATK_BLOCK_SIZE = getEncBlockSize(_type);
+	char tmparray[ATK_BLOCK_SIZE];
+
+	// Condition cond_1;
+	// cond_1.numClauses = 0;
+	// cond_1.nextCondition = NULL;
+	// selectRows(
+	// 	enclave_id, (int*)&status, name, 3, cond_1, 0, -1, 1, 0); //select *
+	// QueryFinish(name, enclave_id, status, QueryFinishCallback);
+	// return;
+
+	// int nextid = GetNextIdOutSgx();
+	// std::printf("next id is %d\n", nextid);
+
+	// 查询条件对两张表都是一致的
+    Condition cond;
+    cond.numClauses = 2;
+    cond.fieldNums[0] = 3;
+    cond.fieldNums[1] = 3;
+    cond.conditionType[0] = 1;  // 1 means larger
+    cond.conditionType[1] = -1;  // -1 means less than
+    cond.values[0] = (uint8_t*)&lower;
+    cond.values[1] = (uint8_t*)&higher;
+    cond.nextCondition = NULL;
+
+	int tempreorserid = -1;
+	// 创建 reorder table，这应该是一个内存表
+    char* tableName = "TempReorder";
+    createTable(
+        enclave_id, 
+        (int*)&status, 
+        _schame,
+        tableName, 
+        strlen(tableName), 
+        TYPE_LINEAR_SCAN, 
+        orgrownum,
+        &tempreorserid
+    );
+
+	// selectRows(enclave_id, (int*)&status, name, 3, cond, 1, -1, 1, 0); //select range
+	// QueryFinish(name, enclave_id, status, QueryFinishCallback);
+	// deleteTable(enclave_id, (int*)&status, "ReturnTable");
+	// return;
+
+	// 获取 重新排序 后的内存表的地址
+	uint8_t* TempReorderTable = (uint8_t*)oblivStructures[tempreorserid];
+	/**
+	 * tableid=1 的表重排序后写到 tableid=2 的表中
+	 * TODO 后面再去抽象，先把功能怼出来的说
+	 */
+	// attacker::OblidbContinueAttack atk(); 
+	// atk.RollCheck();
+
+    attacker::OblidbContinueAttackTest test(low, high);
+    size_t R = test.Size();
+    size_t STEP = R;
+
+	attacker::cursor _cursor;
+	_cursor.begin = 0;
+	_cursor.whichloop = 0;
+
+	// printf("start attack!\n");
+	while(STEP){
+		uint64_t begin;
+		// _Rollback(this, _cursor, _cursor.whichloop);
+		for(int j=_cursor.whichloop;j<orgrownum;++j)
+		{
+			// firstly, reorder table
+			// printf("begin reorder: %d\n", j);
+			int __begin = j;
+			void* src;
+        	void* dst;
+			int end = (__begin + STEP) % orgrownum;
+
+			if(__begin > end){ // 闭环了
+				for(int index=0;index<orgrownum;++index){
+					oblidbextraio::Tuple tuple;
+					targettable->GetTuple(tuple, index);
+					src = (void *)tuple.GetData();
+
+					if(index < end){ // 采样数据, 在table的最末端
+						dst = reinterpret_cast<void *>((TempReorderTable + (orgrownum-end+index)*ATK_BLOCK_SIZE));
+					} else if (index>=end && index<__begin){ // 整体前移的数据
+						dst = reinterpret_cast<void *>((TempReorderTable + (index-end)*ATK_BLOCK_SIZE));
+					} else { // 采样数据
+						dst = reinterpret_cast<void *>((TempReorderTable + (index-end)*ATK_BLOCK_SIZE));
+					}
+					memcpy(dst, src, ATK_BLOCK_SIZE);
+				}
+			} else { // normal
+				for(int index=0;index<orgrownum;++index){
+					oblidbextraio::Tuple tuple;
+					targettable->GetTuple(tuple, index);
+					src = (void *)tuple.GetData();
+
+					if(index < __begin){
+						dst = reinterpret_cast<void *>((TempReorderTable + index*ATK_BLOCK_SIZE));
+					} else if (index >= __begin && index < end){
+						dst = reinterpret_cast<void *>((TempReorderTable + (orgrownum-STEP+index-__begin)*ATK_BLOCK_SIZE));
+					} else {
+						dst = reinterpret_cast<void *>((TempReorderTable + (index-STEP)*ATK_BLOCK_SIZE));
+					}
+					memcpy(dst, src, ATK_BLOCK_SIZE);
+				}
+			}
+
+			// printf("end reorder: %d\n", j);
+			// second, do select
+			// printf("begin select row: %d\n", j);
+			// 聚合操作已经不涉及所谓的 continue 算法了我日
+			selectRows(enclave_id, (int*)&status, tableName, 3, cond, 4, -1, 1, 0); //select range
+			// printf("end select row: %d\n", j);
+			QueryFinish(tableName, enclave_id, status, QueryFinishCallback);
+			deleteTable(enclave_id, (int*)&status, "ReturnTable");
+		}
+
+		printf("Step:%d, Begin:%d, Loop index:%d\n", STEP, _cursor.begin, _cursor.whichloop);
+		STEP /= 2;
+	}
+
+	return;
+}
+
 /**
  * 攻击oblidb continue 的 query, 以获取 range 在 orderd 表中的位置
+ * 代码部分抛弃，兼容性问题不做考虑
  */
 void
 DBContinueAT(sgx_enclave_id_t enclave_id, int status)
@@ -1517,6 +1693,7 @@ void BDB1Linear(sgx_enclave_id_t enclave_id, int status){
 	rankingsSchema.fieldSizes[3] = 4;
 	rankingsSchema.fieldTypes[3] = INTEGER;
 
+	// 这个相当于是 where 子句
 	Condition cond;
 	int val = 1000;
 	cond.numClauses = 1;
@@ -4685,8 +4862,9 @@ int main(int argc, char* argv[])
         //real world query tests
         //PICK EXPERIMENT TO RUN HERE
 		// OpenDB1thTable(enclave_id, status);
-		SelectTable(enclave_id, status);
+		// SelectTable(enclave_id, status);
 		// PersistExample(enclave_id, status);
+		PureContinueAT(enclave_id, status);
 		// DBContinueAT(enclave_id, status);
         //nasdaqTables(enclave_id, status); //2048	
         //complaintTables(enclave_id, status); //4096	

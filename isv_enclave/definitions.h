@@ -39,6 +39,8 @@
 
 #define L_SGX_AESGCM_KEY_SIZE 16
 
+// #define CHANGE_PLANER
+
 typedef enum _Obliv_Type{
 	TYPE_LINEAR_SCAN,
 	TYPE_TREE_ORAM,

@@ -186,6 +186,7 @@ int opOneLinearScanBlock(
 		/* out sgx to write */
 		ocall_write_block(structureId, i, encBlockSize, realEnc);
 	} else {
+		// printf("what is the id: %d\n", structureId);
 		/* out sgx to read */
 		ocall_read_block(structureId, i, encBlockSize, realEnc);
 		//printf("beginning of mac(op)? %d\n", realEnc->macTag[0]);

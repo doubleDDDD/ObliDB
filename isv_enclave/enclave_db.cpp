@@ -2091,126 +2091,125 @@ int selectRows(
 				int dummyVar = 0;
 				int baseline = 0;
 
+#ifndef CHANGE_PLANER
 				/**
 				 * first pass to determine 1) output size (count), 2) whether output is one continuous chunk (continuous)
 				 * planer，选择合适的query算法
 				 */
-				// for(int i = 0; i < oblivStructureSizes[structureId]; i++){
-				// 	/** 
-				// 	 * 这个for循环可以把表过一遍
-				// 	 * 知道 input 表的大小以及 output table 的大小
-				// 	 * 根据这两个值就可以选择合适的 query 算法
-				// 	 * 尽量少的泄露信息
-				// 	 */
-				// 	opOneLinearScanBlock(structureId, i, (Linear_Scan_Block*)row, 0);  /* read table out of sgx */
-				// 	row = ((Linear_Scan_Block*)row)->data;  /* 解密后的明文 */
-				// 	//printf("ready for a comparison? %d\n", c.numClauses);
+				for(int i = 0; i < oblivStructureSizes[structureId]; i++){
+					/** 
+					 * 这个for循环可以把表过一遍
+					 * 知道 input 表的大小以及 output table 的大小
+					 * 根据这两个值就可以选择合适的 query 算法
+					 * 尽量少的泄露信息
+					 */
+					opOneLinearScanBlock(structureId, i, (Linear_Scan_Block*)row, 0);  /* read table out of sgx */
+					row = ((Linear_Scan_Block*)row)->data;  /* 解密后的明文 */
+					//printf("ready for a comparison? %d\n", c.numClauses);
 
-				// 	if(rowMatchesCondition(c, row, schemas[structureId]) && row[0] != '\0'){
-				// 		/* hit */					
-				// 		count++;  /* hit times */
-				// 		if(!continuous && !contTemp){
-				// 			//first hit
-				// 			continuous = 1;
-				// 		}
-				// 		else if(continuous && contTemp){
-				// 			//a noncontinuous hit
-				// 			continuous = 0;
-				// 		}
-				// 	}
-				// 	else{
-				// 		/* no hit */
-				// 		dummyVar++;  /* miss times */
-				// 		if(continuous && !contTemp){
-				// 			//end of continuous chunk
-				// 			contTemp = 1;
-				// 		}
-				// 	}
-				// }
+					if(rowMatchesCondition(c, row, schemas[structureId]) && row[0] != '\0'){
+						/* hit */					
+						count++;  /* hit times */
+						if(!continuous && !contTemp){
+							//first hit
+							continuous = 1;
+						}
+						else if(continuous && contTemp){
+							//a noncontinuous hit
+							continuous = 0;
+						}
+					}
+					else{
+						/* no hit */
+						dummyVar++;  /* miss times */
+						if(continuous && !contTemp){
+							//end of continuous chunk
+							contTemp = 1;
+						}
+					}
+				}
 
 				// printf("Planer: continuous:%d\n", continuous);
-				// // printf("Hit count is %d\n", count);
+				// printf("Hit count is %d\n", count);
 
-				// if(count > oblivStructureSizes[structureId]*.01*PERCENT_ALMOST_ALL && colChoice == -1){ 
-				// 	//return almost all only if the whole row is selected (to make my life easier)
-				// 	/* > 0.9 almost all */
-				// 	almostAll = 1;
-				// }
-				// if(count < 5*ROWS_IN_ENCLAVE){
-				// 	small = 1;  /* 命中很少 */
-				// 	if(count < ROWS_IN_ENCLAVE && continuous == 1) continuous = 0;
-				// }
-				// //printf("%d %f\n",count,  oblivStructureSizes[structureId]*.01*PERCENT_ALMOST_ALL); //count and count needed for almost all
-
+				if(count > oblivStructureSizes[structureId]*.01*PERCENT_ALMOST_ALL && colChoice == -1){ 
+					//return almost all only if the whole row is selected (to make my life easier)
+					/* > 0.9 almost all */
+					almostAll = 1;
+				}
+				if(count < 5*ROWS_IN_ENCLAVE){
+					small = 1;  /* 命中很少 */
+					if(count < ROWS_IN_ENCLAVE && continuous == 1) continuous = 0;
+				}
+				//printf("%d %f\n",count,  oblivStructureSizes[structureId]*.01*PERCENT_ALMOST_ALL); //count and count needed for almost all
 				// printf("Planer: continuous:%d,small:%d,almostAll:%d\n", continuous, small, almostAll);
 
-				// switch(algChoice){
-				// case 1:
-				// 	continuous = 1;
-				// 	small = 0;
-				// 	almostAll = 0;
-				// 	break;
-				// case 2:
-				// 	/* 2 means small */
-				// 	continuous = 0;
-				// 	small = 1;
-				// 	almostAll = 0;
-				// 	break;
-				// case 3:
-				// 	/* hash */
-				// 	continuous = 0;
-				// 	small = 0;
-				// 	almostAll = 0;
-				// 	break;
-				// case 4:
-				// 	continuous = 0;
-				// 	small = 0;
-				// 	almostAll = 1;
-				// 	break;
-				// case 5:
-				// 	/* base line */
-				// 	baseline = 1;
-				// 	continuous = 0;
-				// 	small = 0;
-				// 	almostAll = 0;
-				// 	break;
-				// }
+				switch(algChoice){
+				case 1:
+					continuous = 1;
+					small = 0;
+					almostAll = 0;
+					break;
+				case 2:
+					/* 2 means small */
+					continuous = 0;
+					small = 1;
+					almostAll = 0;
+					break;
+				case 3:
+					/* hash */
+					continuous = 0;
+					small = 0;
+					almostAll = 0;
+					break;
+				case 4:
+					continuous = 0;
+					small = 0;
+					almostAll = 1;
+					break;
+				case 5:
+					/* base line */
+					baseline = 1;
+					continuous = 0;
+					small = 0;
+					almostAll = 0;
+					break;
+				}
 
-				// //create table to return
-				// if(almostAll){
-				// 	/* 原表的大小 */
-				// 	retNumRows = oblivStructureSizes[structureId];
-				// }
-				// else if(small || continuous || baseline){
-				// 	/* 结果的大小 */
-				// 	retNumRows = count;
-				// }
-				// else{
-				// 	/* hash 5倍结果的大小 */
-				// 	retNumRows = 5*count; //hash
-				// }
-				// if(colChoice != -1){ 
-				// 	// include selected col only
-				// 	// if colChoice == -1 means all
-				// 	retSchema.numFields = 2;
-				// 	retSchema.fieldOffsets[0] = 0;
-				// 	retSchema.fieldOffsets[1] = 1;
-				// 	retSchema.fieldSizes[0] = 1;
-				// 	retSchema.fieldSizes[1] = colChoiceSize;
-				// 	retSchema.fieldTypes[0] = CHAR;
-				// 	retSchema.fieldTypes[1] = colChoiceType;
-				// }
-				// else{
-				// 	//include whole selected row
-				// 	retSchema = schemas[structureId];
-				// }
-				// if(intermediate) retNumRows = oblivStructureSizes[structureId];
-				// if(PADDING) retNumRows = PADDING;
-				// //printf("%d %d %d %d %s %d %d\n", retNameLen, retNumRows, retStructId, retType, retName, retSchema.numFields, retSchema.fieldSizes[1]);
+				//create table to return
+				if(almostAll){
+					/* 原表的大小 */
+					retNumRows = oblivStructureSizes[structureId];
+				}
+				else if(small || continuous || baseline){
+					/* 结果的大小 */
+					retNumRows = count;
+				}
+				else{
+					/* hash 5倍结果的大小 */
+					retNumRows = 5*count; //hash
+				}
+				if(colChoice != -1){ 
+					// include selected col only
+					// if colChoice == -1 means all
+					retSchema.numFields = 2;
+					retSchema.fieldOffsets[0] = 0;
+					retSchema.fieldOffsets[1] = 1;
+					retSchema.fieldSizes[0] = 1;
+					retSchema.fieldSizes[1] = colChoiceSize;
+					retSchema.fieldTypes[0] = CHAR;
+					retSchema.fieldTypes[1] = colChoiceType;
+				}
+				else{
+					//include whole selected row
+					retSchema = schemas[structureId];
+				}
+				if(intermediate) retNumRows = oblivStructureSizes[structureId];
+				if(PADDING) retNumRows = PADDING;
+				//printf("%d %d %d %d %s %d %d\n", retNameLen, retNumRows, retStructId, retType, retName, retSchema.numFields, retSchema.fieldSizes[1]);
 				// printf(
 				// 	"Planer: continuous:%d,small:%d,almostAll:%d,retNumRows:%d\n", continuous, small, almostAll, retNumRows);
-
-
+#else
 				/**
 				 * 改造版 planer，如果有 Continuous, 就一定要用 Continuous
 				 */
@@ -2340,6 +2339,8 @@ int selectRows(
 					"Planer: continuous:%d,small:%d,almostAll:%d,retNumRows:%d\n", continuous, small, almostAll, retNumRows);
 				// printf(
 				// 	"retNumRows is %d\n", retNumRows);
+#endif
+				// planer is over
 				// 离开可信区去创建结果表，仅在内存中创建
 				int out = createTable(&retSchema, retName, retNameLen, retType, retNumRows, &retStructId);
 
@@ -2618,7 +2619,7 @@ int selectRows(
 				}
 
 				if(colChoice == -1 || schemas[structureId].fieldTypes[colChoice] != INTEGER){
-					printf("aborting %d %d", colChoice == -1, schemas[structureId].fieldTypes[colChoice] != INTEGER);
+					printf("1 aborting %d %d", colChoice == -1, schemas[structureId].fieldTypes[colChoice] != INTEGER);
 					return 1;
 				}
 				//printf("here %d", structureId);
@@ -2754,7 +2755,7 @@ int selectRows(
 			}
 
 			if(aggregate == -1 || colChoice == -1 || schemas[structureId].fieldTypes[colChoice] != INTEGER) {
-				printf("aborting %d %d %d\n", aggregate == -1, colChoice == -1, schemas[structureId].fieldTypes[colChoice] != INTEGER);
+				printf("2 aborting %d %d %d\n", aggregate == -1, colChoice == -1, schemas[structureId].fieldTypes[colChoice] != INTEGER);
 				return 1;
 			}
 			printf("GROUP BY\n");
@@ -3049,7 +3050,7 @@ int highCardLinGroupBy(char* tableName, int colChoice, Condition c, int aggregat
 
 	//group by
 	if(aggregate == -1 || colChoice == -1 || schemas[structureId].fieldTypes[colChoice] != INTEGER) {
-		printf("aborting %d %d %d\n", aggregate == -1, colChoice == -1, schemas[structureId].fieldTypes[colChoice] != INTEGER);
+		printf("3 aborting %d %d %d\n", aggregate == -1, colChoice == -1, schemas[structureId].fieldTypes[colChoice] != INTEGER);
 		return 1;
 	}
 	printf("GROUP BY\n");

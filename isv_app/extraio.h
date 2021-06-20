@@ -1455,10 +1455,11 @@ public:
         BufferPoolManager* _buffer_pool_manager, 
         DiskManager* _disk_manager, 
         std::string& _tbname,
-        int _encBlockSize, int _rownum, int _type, int _cursor):
+        int _encBlockSize, int _rownum, int _type, int _cursor, Schema* _schema):
         buffer_pool_manager(_buffer_pool_manager), disk_manager(_disk_manager), tablename(_tbname),
         encBlockSize(_encBlockSize), rownum(_rownum), type(_type), cursor(_cursor)
     {
+        memcpy(&schema, _schema, sizeof(Schema));
         table_heap = new TableHeap(buffer_pool_manager);
     }
 
@@ -1467,11 +1468,12 @@ public:
         BufferPoolManager* _buffer_pool_manager, 
         DiskManager* _disk_manager, 
         std::string& _tbname,
-        int _encBlockSize, int _rownum, int _type, int _cursor, page_id_t first_page_id):
+        int _encBlockSize, int _rownum, int _type, int _cursor, page_id_t first_page_id, Schema* _schema):
         buffer_pool_manager(_buffer_pool_manager), disk_manager(_disk_manager), tablename(_tbname),
         encBlockSize(_encBlockSize), rownum(_rownum), type(_type), cursor(_cursor)
     {
         assert(cursor==rownum);
+        memcpy(&schema, _schema, sizeof(Schema));
         table_heap = new TableHeap(buffer_pool_manager, first_page_id);
     }
 
@@ -1496,6 +1498,8 @@ public:
     void DeallocateOnePage() { disk_manager->DeallocateOnePage(); }
     std::string& TableName() { return tablename; }
     int Type() const { return type; }
+
+    Schema* GetSchema() { return &schema; } 
 private:
     std::string tablename;
     BufferPoolManager* buffer_pool_manager;
@@ -1504,6 +1508,7 @@ private:
     int rownum;
     int type;
     TableHeap* table_heap;  /* table head 几乎是最简单的数据库文件组织方式 */
+    Schema schema;
 
     /* 代表目前准备写位置的下标，每张表只写一次，游标就用一次，init一次，为 real write 准备 */
     int cursor;  
@@ -1562,7 +1567,10 @@ public:
 class OblidbContinueAttack : public Attacker
 {
 public:
-    OblidbContinueAttack(
+    OblidbContinueAttack(OblidbContinueAttack const &)=delete;
+    OblidbContinueAttack& operator=(OblidbContinueAttack const &)=delete;
+
+    explicit OblidbContinueAttack(
         ssize_t _blocksize, Tsize _insize, 
         Rsize _outsize, uint8_t* _ttable, 
         uint8_t* _rtable, uint64_t _range_low, uint64_t _range_high):
@@ -1571,15 +1579,28 @@ public:
     {
         // 暂存调序后的输入表
         tmpttable = (uint8_t*)malloc(blocksize * insize);
-        // 暂存调蓄后的结果表
+        // 暂存调序后的结果表
         tmprtable = (uint8_t*)malloc(blocksize * outsize);
 
         // 步长的初始值与结果表大小一致
         step = outsize;
     }
-    ~OblidbContinueAttack(){
-        free(tmpttable);
-        free(tmprtable);
+
+    explicit OblidbContinueAttack(
+        uint8_t* _reordertable) : reordertable(_reordertable)
+    {
+        step = outsize;
+    }
+
+    virtual ~OblidbContinueAttack()
+    {
+        // 有机会再换智能指针的写法
+        if(tmpttable){
+            free(tmpttable);
+        }
+        if(tmprtable){
+            free(tmprtable);
+        }
     }
 
     void ReorderTable(int begin){
@@ -1702,6 +1723,9 @@ private:
     uint64_t range_high;
 
     int step;  /* 每次检查的步长 */
+
+    // 临时表的内存空间由 app 自己 联合 sgx 共同管理，尽量减少攻击外要素的影响
+    uint8_t* reordertable;
 
     friend void _Rollback(OblidbContinueAttack*, cursor&, int);
 };
