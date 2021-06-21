@@ -18,6 +18,10 @@ int logicalSizes[NUM_STRUCTURES] = {0};
 node *bPlusRoots[NUM_STRUCTURES] = { NULL };
 Oram_Bucket linOramCache = {0};
 
+// TODO 写死的硬代码，需要随时调整的
+int tempOutV[4] = {0};
+int curindex = 0;
+
 int newBlock(int structureId){
 	int blockNum = -1;
 	for(int i = 0; i < logicalSizes[structureId]; i++){
@@ -51,6 +55,31 @@ int freeBlock(int structureId, int blockNum){
 
 // 		return ret;
 // }
+
+int
+NewQueryBegin()
+{
+	curindex = 0;
+	int up = sizeof(tempOutV)/sizeof(int);
+	for(int i=0;i<up;++i){
+		tempOutV[i]=0;
+	}
+	return 0;
+}
+
+int
+NewQueryEnd()
+{
+	if(tempOutV[0] == 13)
+		return 0;
+	
+	printf("begin new\n");
+	int up = sizeof(tempOutV)/sizeof(int);
+	for(int i=0;i<up;++i){			
+		printf("i:%d,v:%d\n", i, tempOutV[i]);
+	}
+	return 0;
+}
 
 /**
  * data -> real -> realenc
@@ -94,6 +123,7 @@ decryptOneBlock(Encrypted_Linear_Scan_Block *block, int tableid)
 	char _char;
 	char *_text;
 
+#ifdef AGGR_DEBUG
 	// printf("table id: %d\n", tableid);
 	for(int ii=0;ii<numFields;++ii){
 		DB_Type _type = schemas[tableid].fieldTypes[ii];
@@ -101,7 +131,9 @@ decryptOneBlock(Encrypted_Linear_Scan_Block *block, int tableid)
 		{
 		case INTEGER:
 			memcpy(&_int, &row[schemas[tableid].fieldOffsets[ii]], 4);
+			// if(_int != 46){
 			printf("offset:%d,val:%d\n", schemas[tableid].fieldOffsets[ii], _int);
+			// }
 			break;
 		case TINYTEXT:
 			_text = (char *)&row[schemas[tableid].fieldOffsets[ii]];
@@ -110,13 +142,17 @@ decryptOneBlock(Encrypted_Linear_Scan_Block *block, int tableid)
 		default:
 			/* CHAR */
 			_char = row[schemas[tableid].fieldOffsets[ii]];
-			printf("offset:%d,val:%c\n", schemas[tableid].fieldOffsets[ii], _char);
+			// printf("offset:%d,val:%c\n", schemas[tableid].fieldOffsets[ii], _char);
 			break;
 		}
 	}
-	// memcpy(&val, &row[schemas[tableid].fieldOffsets[3]], 4);
+#else
+	memcpy(&val, &row[schemas[tableid].fieldOffsets[3]], 4);
 	// printf(
 	// 	"%d: data:%s,addr:%d,revNum:%d,val:%d\n", tableid, real->data, _actualAddr, _revNum, val);
+	tempOutV[curindex] = val;
+	curindex += 1;
+#endif
 	return 0;
 }
 
@@ -914,6 +950,7 @@ sgx_status_t init_structure(
 		/* 表的数量超过限制 */
 		return SGX_ERROR_UNEXPECTED;
 	}
+
     if(*structureId != -1) {newId = *structureId;}
     int logicalSize = size;
     logicalSizes[newId] = logicalSize;

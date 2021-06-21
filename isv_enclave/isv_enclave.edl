@@ -112,6 +112,8 @@ enclave {
 		public int opOneLinearScanBlock(int structureId, int index, [user_check]Linear_Scan_Block* block, int write);
 		public int incrementNumRows(int structureId);
 		public int getNumRows(int structureId);
+		public int NewQueryBegin();
+		public int NewQueryEnd();
 		public int decryptOneBlock([user_check]Encrypted_Linear_Scan_Block* block, int tableid);
 		public int ReopenTable(int structureId, [user_check]Schema* schema, [user_check]unsigned char* key, int rownum, [user_check]char* tbname, int tbnamelen, Obliv_Type type);
     };

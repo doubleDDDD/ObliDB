@@ -116,8 +116,12 @@ int createTable(
 	// 判断重名表
 	for(int j=0;j<NUM_STRUCTURES;++j){
 		// printf("1:%s,2:%s\n", tableName, tableNames[j]);
-		if(tableName && tableNames[j]) {
-			if(strcmp(tableName, tableNames[j])==0){ return 1; }
+		if(tableName && tableNames[j] && numRows[j]!=0) {
+			// && numRows[j]!=0
+			if(strcmp(tableName, tableNames[j])==0){
+				// printf("same name: %s\n", tableName);
+				return 1;
+			}
 		}
 	}
 
@@ -224,11 +228,17 @@ ReopenTable(
 }
 
 int deleteTable(char* tableName) {
+	// printf("ready to delete table: %s\n", tableName);
 	int structureId = getTableId(tableName);
+	// printf("will delete table id: %d\n", structureId);
 	free_structure(structureId);
+	// printf("befor free, trydebug: %s,%p\n", tableNames[structureId], tableNames[structureId]);
+	// 这个是 sgx 内部自己实现的 free
 	free(tableNames[structureId]);
+	// printf("after free, trydebug: %s,%p\n", tableNames[structureId], tableNames[structureId]);
 	numRows[structureId] = 0;
 	schemas[structureId] = {0};
+	// printf("finish delete table: %s\n", tableName);
 }
 
 int growStructure(int structureId){//TODO: make table double in size if the allocated space is full
@@ -872,7 +882,10 @@ void opaqueSort(int tableId, int size){
 	}	
 }
 
-int joinTables(char* tableName1, char* tableName2, int joinCol1, int joinCol2, int startKey, int endKey) {//put the smaller table first for
+int joinTables(
+	char* tableName1, char* tableName2, int joinCol1, int joinCol2, int startKey, int endKey) 
+{
+	//put the smaller table first for
 	//create an oram, do block nested loop join in it, and manually convert it to a linear scan table
 	int structureId1 = getTableId(tableName1);
 	int structureId2 = getTableId(tableName2);//printf("table ids %d %d\n", structureId1, structureId2);
@@ -2416,6 +2429,7 @@ int selectRows(
 					for(int i = 0; i < oblivStructureSizes[structureId]; i++){
 						if(count == 0) break;
 						/* 读 T 表 */
+						// printf("t table: %d\n", structureId);
 						opOneLinearScanBlock(structureId, i, (Linear_Scan_Block*)row, 0);
 
 						row = ((Linear_Scan_Block*)row)->data;
@@ -2423,6 +2437,7 @@ int selectRows(
 						//printf("here2 %d %d\n", rowi, count);
 
 						/* 读 R 表 */
+						// printf("r table: %d\n", retStructId);
 						opOneLinearScanBlock(retStructId, rowi%count, (Linear_Scan_Block*)row2, 0);
 						//printf("here2\n");
 						row2 = ((Linear_Scan_Block*)row2)->data;
@@ -2650,22 +2665,26 @@ int selectRows(
 						int val = (int)row[schemas[structureId].fieldOffsets[colChoice]];
 						switch(aggregate){
 						case 1:
-								stat+=val;
+							// sum
+							stat+=val;
 							break;
 						case 2:
+							// min
 							if(val < stat || first == 0){
 								stat = val;
 								winRow = i;
 							}
 							break;
 						case 3:
+							// max
 							if(val > stat || first == 0){
 								stat = val;
 								winRow = i;
 							}
 							break;
 						case 4:
-								stat+=val;
+							// mean
+							stat+=val;
 							break;
 						}
 						first = 1;
@@ -2719,10 +2738,10 @@ int selectRows(
 					free(oBlock);
 					deleteTable(tempName);
 				}
-
 			}
 		}
-		else{ //group by
+		else{ 
+			//group by
 
 			//hack to simulate baseline where all these structures are in an oram.
 			//Just do extra oram ops every time there would be an access

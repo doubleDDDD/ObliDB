@@ -1766,4 +1766,26 @@ _Rollback(OblidbContinueAttack* ths, cursor& _cursor, int loopindex)
         }
     }
 }
+
+class AttackWindow
+{
+public:
+    explicit AttackWindow(bool _attackflag): attackflag(_attackflag) 
+    {
+        hitflag = false;
+    }
+    virtual ~AttackWindow(){}
+
+    AttackWindow(AttackWindow const&)=delete;
+    AttackWindow& operator=(AttackWindow const&)=delete;
+
+    bool GetFlag() const { return attackflag; }
+    void SetFlag(bool _flag) { attackflag=_flag; }
+
+    bool GetHitFlag() const { return hitflag; }
+    void SetHitFlag(bool _hitflag) { hitflag = _hitflag; }
+private:
+    bool attackflag;
+    bool hitflag;
+};
 } // namespace attacker

