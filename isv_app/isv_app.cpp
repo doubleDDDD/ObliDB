@@ -1232,7 +1232,11 @@ PureContinueAT(sgx_enclave_id_t enclave_id, int status)
 
 			// only 单线程，在 attackflag = true 的窗口中，进行 select
 			atkw.SetFlag(true);
-			selectRows(enclave_id, (int*)&status, resulttablename, 1, cond_1, 0, 1, 4, 0);  // 1 means sum
+			/**
+			 * select 第一列 count(第一列) group by 第一列;
+			 * 其实具体聚合函数是什么已经不重要了，数量就直接能区分了
+			 */
+			selectRows(enclave_id, (int*)&status, resulttablename, 1, cond_1, 0, 1, 4, 0);
 			// QueryFinish(resulttablename, enclave_id, status, QueryFinishCallback, -1);
 			deleteTable(enclave_id, (int*)&status, "ReturnTable");  // group by 的结果不一样了
 			atkw.SetFlag(false);
