@@ -1032,7 +1032,7 @@ PureContinueAT(sgx_enclave_id_t enclave_id, int status)
 {
 	int i;
 	std::string tbname;
-	std::string tar = "test2th"; // 类型转换的构造函数
+	std::string tar = "test2th"; // 类型转换的构造函数, size of test2th is 88
 	for(i=0;i<NUM_STRUCTURES;++i){
 		if(!dbtables[i]) { continue; }
 		oblidbextraio::DBTable* p = dbtables[i];
@@ -1183,6 +1183,8 @@ PureContinueAT(sgx_enclave_id_t enclave_id, int status)
 					memcpy(dst, src, ATK_BLOCK_SIZE);
 				}
 			}
+
+			// 生成一次乱序表
 
 			// 聚合操作已经不涉及所谓的 continue 算法了我日
 			// 所以这里对重排序表应该做 select * 的操作，而不是聚合操作，聚合应该是下一步的操作

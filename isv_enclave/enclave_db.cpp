@@ -2157,6 +2157,10 @@ int selectRows(
 				//printf("%d %f\n",count,  oblivStructureSizes[structureId]*.01*PERCENT_ALMOST_ALL); //count and count needed for almost all
 				// printf("Planer: continuous:%d,small:%d,almostAll:%d\n", continuous, small, almostAll);
 
+				/**
+				 * 这个switch是没有default的
+				 * 论文里有一句话  For maximum flexibility, users can also manually choose to force a particular operator
+				 */
 				switch(algChoice){
 				case 1:
 					continuous = 1;
@@ -2225,6 +2229,8 @@ int selectRows(
 #else
 				/**
 				 * 改造版 planer，如果有 Continuous, 就一定要用 Continuous
+				 * 这部分代码自己写傻逼了，用户使用的api中，算法的选择只要不选，就会利用 planer 所选择出来的算法而不会覆盖掉
+				 * 但是代码还是留着吧，警醒一下
 				 */
 				for(int i = 0; i < oblivStructureSizes[structureId]; i++){
 					opOneLinearScanBlock(structureId, i, (Linear_Scan_Block*)row, 0);  /* read table out of sgx */
