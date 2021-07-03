@@ -464,6 +464,7 @@ ocall_read_block(
 		return;
 	}
 
+#ifdef PERSIST_ENGINE
 	if(dbtables[structureId]){
 		// read disk table
 		assert(dbtables[structureId]);
@@ -485,7 +486,10 @@ ocall_read_block(
 		memcpy(
 			buffer, oblivStructures[structureId]+((long)index*blockSize), blockSize);
 	}
-
+#else
+		memcpy(
+			buffer, oblivStructures[structureId]+((long)index*blockSize), blockSize);
+#endif
 	return;
 	//printf("heer\n");fflush(stdout);
 	//printf("index: %d, blockSize: %d structureId: %d\n", index, blockSize, structureId);
@@ -510,6 +514,7 @@ ocall_write_block(
 	// printf("ocall_write_block: %d,%d,%d\n", structureId, index, blockSize);
 	RW_Type storagetype = oblivStructureStorageTypes[structureId];
 
+#ifdef PERSIST_ENGINE
     if(storagetype == MEMORY){
         memcpy(oblivStructures[structureId]+((long)index*blockSize), buffer, blockSize);
     } else {
@@ -543,7 +548,9 @@ ocall_write_block(
 			table->IncrementCursor();
 		}
     }
-
+#else
+	memcpy(oblivStructures[structureId]+((long)index*blockSize), buffer, blockSize);
+#endif
 	return;
 
 	//printf("data: %d %d %d %d\n", structureId, index, blockSize, ((int*)buffer)[0]);fflush(stdout);
@@ -655,6 +662,7 @@ void
 ocall_newStructure(
 	int newId, Obliv_Type type, int size, TABLE_TYPE tableType)
 {	
+#ifdef PERSIST_ENGINE
     switch (tableType)
     {
     case RET:
@@ -669,7 +677,10 @@ ocall_newStructure(
 		oblivStructureStorageTypes[newId] = DISK;
         break;
     }
-
+#else
+        newStructureinmemory(newId, type, size);
+		oblivStructureStorageTypes[newId] = MEMORY;
+#endif
 	return;
 
 	//this is actual size, the logical size will be smaller for orams
@@ -1799,7 +1810,7 @@ void BDB1Linear(sgx_enclave_id_t enclave_id, int status){
 	cond.nextCondition = NULL;
 
 	// int real_rowline = 360000;
-	int real_rowline = 360;
+	int real_rowline = 360000;
 
 	char* tableName = "rankings";
 	createTable(
@@ -1840,7 +1851,7 @@ void BDB1Linear(sgx_enclave_id_t enclave_id, int status){
 		incrementNumRows(enclave_id, (int*)&status, structureId1);
 	}
 	printf("created BDB1 table - linear\n");
-	return;
+	// return;
 
 	time_t startTime, endTime;
 	double elapsedTime;
@@ -1863,6 +1874,9 @@ void BDB1Linear(sgx_enclave_id_t enclave_id, int status){
 	printf("BDB1 running time (hash): %.5f\n", elapsedTime);
 	//printTable(enclave_id, (int*)&status, "ReturnTable");
     deleteTable(enclave_id, (int*)&status, "ReturnTable");
+
+	return;
+
 	startTime = clock();
 	selectRows(enclave_id, (int*)&status, "rankings", -1, cond, -1, -1, 5, 0);
 	//char* tableName, int colChoice, Condition c, int aggregate, int groupCol, int algChoice, int key_start, int key_end
@@ -4926,8 +4940,9 @@ int main(int argc, char* argv[])
 		 * 考虑一下执行顺序，只有reopen需要去换
 		 * 而不是在 reopn 的过程中自行在 sgx 的堆上 malloc
 		 */
+#ifdef PERSIST_ENGINE
     	ConnectDB(enclave_id, status);
-
+#endif
     	//trigger oram initialization
     	ra_samp_response_header_t *oramInitMsg_resp = NULL;
         ra_samp_request_header_t* p_oramInitMsg = (ra_samp_request_header_t*) malloc(sizeof(ra_samp_request_header_t));
@@ -4957,15 +4972,15 @@ int main(int argc, char* argv[])
         //real world query tests
         //PICK EXPERIMENT TO RUN HERE
 		// OpenDB1thTable(enclave_id, status);
-		SelectTable(enclave_id, status);
+		// SelectTable(enclave_id, status);
 		// PersistExample(enclave_id, status);
-		PureContinueAT(enclave_id, status);
+		// PureContinueAT(enclave_id, status);
 		// DBContinueAT(enclave_id, status);
         //nasdaqTables(enclave_id, status); //2048	
         //complaintTables(enclave_id, status); //4096	
         //flightTables(enclave_id, status); //512 (could be less, but we require 512 minimum)	
         // BDB1Index(enclave_id, status);//512		
-        // BDB1Linear(enclave_id, status);//512		
+        BDB1Linear(enclave_id, status);//512		
         //BDB2(enclave_id, status, 0);//2048		
         //BDB2Index(enclave_id, status, 0);//2048	
         //BDB3(enclave_id, status, 0);//2048		
@@ -5471,9 +5486,9 @@ CLEANUP:
     }
 
     sgx_destroy_enclave(enclave_id);
-
+#ifdef PERSIST_ENGINE
 	CloseDB();
-
+#endif
     //todo(Saba): need to free stuff that I used in the code I added
     /*moved up
      * ra_free_network_response_buffer(p_msg0_resp_full);

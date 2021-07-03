@@ -19,6 +19,9 @@
 
 #include "../isv_enclave/definitions.h"//structs, enums, fixed constants
 
+
+// #define PERSIST_ENGINE
+
 namespace oblidbextraio {
 /***********************/
 

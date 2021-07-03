@@ -2457,7 +2457,7 @@ int selectRows(
 							numRows[retStructId]++;//printf("HEER %d %d", retStructId, numRows[retStructId]);
 						}
 						else{
-							/* row2可能已经是结果了，这里仅仅是重写写下去而已 */
+							/* row2可能已经是结果了，这里仅仅是重新写下去而已 */
 							opOneLinearScanBlock(retStructId, rowi%count, (Linear_Scan_Block*)row2, 1);
 							dummyVar++;
 						}
@@ -2499,9 +2499,16 @@ int selectRows(
 						int isNotPaused = 1;
 						int roundNum = 0;
 						uint8_t* storage = (uint8_t*)malloc(ROWS_IN_ENCLAVE*colChoiceSize);
+						// 这里这个 do 的意思是需要遍历多少次原来的表，每一次遍历的有效的结果需要借助 enclave 来暂存
+						// 说白了就是在利用 enclave 中的一个 buffer, 有点像 dma 的那个 buffer 的感觉
+						// 每一次循环也都有像sgx外的结果表写数据
+						// 需要 enclave 内存是指的需要 sgx 内部的内存
+						// small 需要多次遍历 T 表，所以适用于 T 表本身就很小的情况
+						// 正常的query是泄露的访问模式一次读一次写，或者一次读一次写
 						do{
 							if(count == 0) break;
 							int rowi = -1;
+							// enclave 的大小所决定的循环的次数中的一次循环
 							for(int i = 0; i < oblivStructureSizes[structureId]; i++){
 								/* 遍历所有 tuple */
 								opOneLinearScanBlock(structureId, i, (Linear_Scan_Block*)row, 0);  /* 读一个tuple上来 */
@@ -2521,7 +2528,10 @@ int selectRows(
 									storageCounter++;
 								}
 								else{
-									/* 有一个 dummy 的写操作，有些写操作可能无法真实的完成，在enclave满的情况下可能无法完成 */
+									/**
+									 * 有一个 dummy 的写操作，有些写操作可能无法真实的完成，在enclave满的情况下可能无法完成
+									 * 这个地方比较明显，这里就是在一个 enclave 无法容纳的时候做的操作，用性能来换hide的操作
+									 */
 									memcpy(dummy, dummy, colChoiceSize);
 									dummyCounter++;
 								}
@@ -2567,7 +2577,7 @@ int selectRows(
 							row = ((Linear_Scan_Block*)row)->data;
 							//if(row[0] == '\0') continue;
 							//else rowi++;
-							if(row[0] != '\0') rowi++;
+							if(row[0] != '\0') rowi++;  // 块号
 							else dummyVar++;
 
 							int match = rowMatchesCondition(c, row, schemas[structureId]) && row[0] != '\0';
@@ -2586,7 +2596,8 @@ int selectRows(
 							index2 %= count;
 							//printf("here %d %d %d %d\n", index1, index2, match, count);
 
-							//walk through the 5 entries for each hash and write in the first place that has room, dummy write the rest
+							// walk through the 5 entries for each hash and write in the first place that has room, dummy write the rest
+							// 结果表的大小是5倍的count的数量，所以整个 T 一定是被 hash 到 5个entry中的某一个的，行号对5取模就可以完成hash的过程了
 							int written = 0;
 							if(match && row[0]!='\0') written = 0;
 							else written = 1;
