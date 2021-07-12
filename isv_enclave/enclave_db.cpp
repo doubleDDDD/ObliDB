@@ -2629,14 +2629,12 @@ int selectRows(
 						}
 					}
 				}
-
 			}
 			else{
 				// 有聚合但是没有 group by
 				// aggregate = 0 count, 1 sum, 2 min, 3 max, 4 mean
-				//doing an aggregate with no group byprintf("here %d", structureId);
-				//query plan gives away that there's only one row to return, so padding doesn't hide anything extra
-
+				// doing an aggregate with no group byprintf("here %d", structureId);
+				// query plan gives away that there's only one row to return, so padding doesn't hide anything extra
 				int baseline=0, baselineId=-1;
 				char *tempName = "Temp";
 				Oram_Block* oBlock;
@@ -2790,10 +2788,12 @@ int selectRows(
 				opOramBlock(baselineId, 0, oBlock, 1);
 			}
 
+			// group by 就是配合聚合函数来使用的，如果没有聚合函数的，一切白搭
 			if(aggregate == -1 || colChoice == -1 || schemas[structureId].fieldTypes[colChoice] != INTEGER) {
 				printf("2 aborting %d %d %d\n", aggregate == -1, colChoice == -1, schemas[structureId].fieldTypes[colChoice] != INTEGER);
 				return 1;
 			}
+
 			printf("GROUP BY\n");
 			//we will do this for small numbers of groups. the doc has an algorithm that can be used for larger numbers of groups
 			//that uses the hyperloglog algorithm
