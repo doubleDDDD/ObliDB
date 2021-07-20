@@ -1848,6 +1848,37 @@ VolumeAttack(sgx_enclave_id_t enclave_id, int status)
  */
 
 
+/**
+ ********** aggregation attack *******************
+ - 针对表中的某一个属性聚合，聚合函数能够计算出5个值
+    - 分别是 min/max/avg/sum，这4个值是有大小关系的，加密存储
+    - 尽管 count 也是加密存储，但是这个作者明确表示是会泄露的，所以这个大小是已知的，假设 count=T
+    - 我可以在 sgx 之外拼接一张新表（5行一列），称之为 Table1，用来保存5个值，分别是 count/min/max/avg/sum（其中 count 已知）
+        - 如果表中的 value 是有序排列的，planner 会优先选择 continuous 算法
+        - 其中 min<=avg<=max 序列是一定能保证的，但是 sum 与 count 的位置不确定，所以要试
+        - 这里利用 continuous 算法与其它算法（其实基本就是 large）在 内存访问模式 的差异来做区分，理论上是能够试出来 5 个聚合值之间的大小关系的
+            - 理论上假设我最终得到了这样的一个大小关系
+                - min < sum < avg < max < count
+                - 其中 count 是已知的，至少现在对这个表中的这个属性心里稍微就有点数了
+- 然后我对这个还不满足，我甚至想要 像知道 count 一样 知道这些值具体是多少，理论上也是可行的
+    - oblidb的continuous上有这样的一个缺陷
+        - 对于一次 range query，能够推测出符合条件的 tuple 在 input 表中的位置
+    - 根据上面的操作，我已经知道了 聚合值 的一个大概的范围。以及其大小关系
+    - 我可以在 聚合值 构成的表（由小到大的顺序排列）中执行 continuous query，这个range是我给定的，假设是有一个这样的窗口，根据前面推测出的范围可以去滑动
+    - 我去 check 本次窗口落在了哪个范围上，比如假设我有一个窗口 [A,B]，continuous query 得到的结果范围是 2与3，即sum与avg
+        - 这样的话我就可以推测 [sum,avg] 属于 [A,B]
+            - 缩小窗口，最终我理论上就能够计算出 sum 与 avg 的大小
+    - 同理，理论上，需要时间，我就能够 get 到 所有的聚合统计属性值
+ */
+int
+AggregationAttack(sgx_enclave_id_t enclave_id, int status)
+{
+	return 0;
+}
+/**
+ ********** aggregation attack *******************
+ */
+
 
 /**
  *****************************
@@ -5167,7 +5198,8 @@ int main(int argc, char* argv[])
         // joinTests(enclave_id, status);//512		
         //workloadTests(enclave_id, status);//512	
         //insdelScaling(enclave_id, status);//512	
-		VolumeAttack(enclave_id, status);
+		// VolumeAttack(enclave_id, status);
+		AggregationAttack(enclave_id, status);
 
 /*
 	//test for sophos - linear
