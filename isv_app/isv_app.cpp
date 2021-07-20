@@ -94,6 +94,8 @@ RW_Type oblivStructureStorageTypes[NUM_STRUCTURES] = {MEMORY};  // 存储类型
 char* globaltablename;  // 用来暂存tablename的，暂时不支持多线程并发去 access db
 Schema* globalschema;  // 同上
 
+TableSize* globaltsizepair;  // 这个对象自己 malloc 创建
+
 // 全局打开表的数组
 oblidbextraio::DBTable* dbtables[NUM_STRUCTURES] = {nullptr};
 
@@ -592,6 +594,14 @@ void newStructureinmemory(int newId, Obliv_Type type, int rownum)
 			atkw.SetHitFlag(true);
 		}
 	}
+
+	// std::printf("table id is %d, size of table:%d\n", newId, rownum);
+
+#ifdef VALUME_ATTACK
+	if(newId==0) { globaltsizepair->tsize = static_cast<float>(rownum); }
+	else { globaltsizepair->ssize = static_cast<float>(rownum); }	
+#endif
+
 	return;
 }
 
@@ -1671,11 +1681,177 @@ DBContinueAT(sgx_enclave_id_t enclave_id, int status)
     return;
 }
 
+
 /**
- *****************************
+ ********** volume attack *******************
+ */
+
+/**
+ * 基本思想就是 oblidb 中 input 表与结果表大小的泄露
+ * 	input table: T
+ * 	output table: S
+ * 在基本已知一个 query 语句的前提下，根据先验知识去获得 query 的具体是什么
+ * 一个包含血型的 table，血型的概率就是我们已知的血型的概率，例如
+ * 	A: 28.4%, 142003/500000
+ * 	B: 29.3%, 146588/500000
+ * 	AB: 9%, 45335/500000
+ * 	O: 33.2%, 166074/500000
+ * 假设有一条 query 语句 select * from bloodtable where type=A;
+ * 	如果这个时候我观察到 S/T=0.2 我就可以猜到本次 query 的 type 是 A
+ * 	就是这样的一个过程
+ * 具体实现中，表的大小我都无需观察，我直接 在代码中去 get size 都可以
+ * 
+ * 并且直接化简为 名字+血型, $1+$13
+ */
+int
+VolumeAttack(sgx_enclave_id_t enclave_id, int status)
+{
+	uint8_t* row = (uint8_t*)malloc(BLOCK_DATA_SIZE);
+	int structureIdIndex = -1;
+
+	Schema bloodSchema;
+	bloodSchema.numFields = 3;
+	// built-in id
+	bloodSchema.fieldOffsets[0] = 0;
+	bloodSchema.fieldSizes[0] = 1;
+	bloodSchema.fieldTypes[0] = CHAR;
+	// name
+	bloodSchema.fieldOffsets[1] = 1;
+	bloodSchema.fieldSizes[1] = 255;
+	bloodSchema.fieldTypes[1] = TINYTEXT;
+	// blood type
+	bloodSchema.fieldOffsets[2] = 256;
+	bloodSchema.fieldSizes[2] = 255;
+	bloodSchema.fieldTypes[2] = TINYTEXT;
+
+	Condition condab;
+	char *_dataab = "AB";
+	condab.numClauses = 1;
+	condab.fieldNums[0] = 2;
+	condab.conditionType[0] = 0;
+	condab.values[0] = (uint8_t*)malloc(255);
+	strncpy((char*)condab.values[0], _dataab, strlen(_dataab)+1);
+	condab.nextCondition = NULL;
+
+	Condition conda;
+	char *_dataa = "A";
+	conda.numClauses = 1;
+	conda.fieldNums[0] = 2;
+	conda.conditionType[0] = 0;
+	conda.values[0] = (uint8_t*)malloc(255);
+	strncpy((char*)conda.values[0], _dataa, strlen(_dataa)+1);
+	conda.nextCondition = NULL;
+
+	Condition condb;
+	char *_datab = "B";
+	condb.numClauses = 1;
+	condb.fieldNums[0] = 2;
+	condb.conditionType[0] = 0;
+	condb.values[0] = (uint8_t*)malloc(255);
+	strncpy((char*)condb.values[0], _datab, strlen(_datab)+1);
+	condb.nextCondition = NULL;
+
+	Condition condo;
+	char *_datao = "O";
+	condo.numClauses = 1;
+	condo.fieldNums[0] = 2;
+	condo.conditionType[0] = 0;
+	condo.values[0] = (uint8_t*)malloc(255);
+	strncpy((char*)condo.values[0], _datao, strlen(_datao)+1);
+	condo.nextCondition = NULL;
+
+	int rowline = 500000;
+
+#ifdef VALUME_ATTACK
+	if(!globaltsizepair){ 
+		globaltsizepair = reinterpret_cast<TableSize*>(malloc(sizeof(TableSize)));
+	}
+
+	globaltsizepair->tsize=static_cast<float>(0);
+	globaltsizepair->ssize=static_cast<float>(0);
+#endif
+
+	char* tableName = "blood";
+	createTable(
+		enclave_id, 
+		(int*)&status, 
+		&bloodSchema, 
+		tableName, 
+		strlen(tableName), 
+		TYPE_LINEAR_SCAN, 
+		rowline, 
+		&structureIdIndex);
+
+	std::ifstream file("/home/hdd/workspace/ssd_mount/abblood.csv");
+
+	char line[BLOCK_DATA_SIZE];
+	char data[BLOCK_DATA_SIZE];
+	row[0] = 'a';
+
+	for(int i = 0; i < rowline; i++) {
+		memset(row, 'a', BLOCK_DATA_SIZE);
+		file.getline(line, BLOCK_DATA_SIZE);
+
+		std::istringstream ss(line);
+		for(int j = 0; j < 2; j++){
+			if(!ss.getline(data, BLOCK_DATA_SIZE, ',')) { break; }
+			strncpy((char*)&row[bloodSchema.fieldOffsets[j+1]], data, strlen(data)+1);
+		}
+		opOneLinearScanBlock(enclave_id, (int*)&status, structureIdIndex, i, (Linear_Scan_Block*)row, 1);
+		incrementNumRows(enclave_id, (int*)&status, structureIdIndex);
+	}
+	printf("created blood table - linear\n");
+
+#ifdef VALUME_ATTACK
+	// check AB
+	selectRows(enclave_id, (int*)&status, "blood", -1, condab, -1, -1, 2, 0);
+	deleteTable(enclave_id, (int*)&status, "ReturnTable");
+	assert(globaltsizepair);
+	assert(globaltsizepair->tsize>=globaltsizepair->ssize>0);
+	int out = (globaltsizepair->ssize/globaltsizepair->tsize) * 100;
+	std::printf("AB: S/T: %d%\n", out);
+
+	// check A
+	selectRows(enclave_id, (int*)&status, "blood", -1, conda, -1, -1, 2, 0);
+	deleteTable(enclave_id, (int*)&status, "ReturnTable");
+	assert(globaltsizepair);
+	assert(globaltsizepair->tsize>=globaltsizepair->ssize>0);
+	out = (globaltsizepair->ssize/globaltsizepair->tsize) * 100;
+	std::printf("A: S/T: %d%\n", out);
+
+	// check B
+	selectRows(enclave_id, (int*)&status, "blood", -1, condb, -1, -1, 2, 0);
+	deleteTable(enclave_id, (int*)&status, "ReturnTable");
+	assert(globaltsizepair);
+	assert(globaltsizepair->tsize>=globaltsizepair->ssize>0);
+	out = (globaltsizepair->ssize/globaltsizepair->tsize) * 100;
+	std::printf("B: S/T: %d%\n", out);
+
+	// check O
+	selectRows(enclave_id, (int*)&status, "blood", -1, condo, -1, -1, 2, 0);
+	deleteTable(enclave_id, (int*)&status, "ReturnTable");
+	assert(globaltsizepair);
+	assert(globaltsizepair->tsize>=globaltsizepair->ssize>0);
+	out = (globaltsizepair->ssize/globaltsizepair->tsize) * 100;
+	std::printf("O: S/T: %d%\n", out);
+
+	free(globaltsizepair);
+#endif
+
+	deleteTable(enclave_id, (int*)&status, "blood");
+
+	return 0;
+}
+
+/**
+ ********** volume attack *******************
  */
 
 
+
+/**
+ *****************************
+ */
 void BDB1Index(sgx_enclave_id_t enclave_id, int status){
 	//block size needs to be 512
 
@@ -4991,7 +5167,7 @@ int main(int argc, char* argv[])
         // joinTests(enclave_id, status);//512		
         //workloadTests(enclave_id, status);//512	
         //insdelScaling(enclave_id, status);//512	
-
+		VolumeAttack(enclave_id, status);
 
 /*
 	//test for sophos - linear

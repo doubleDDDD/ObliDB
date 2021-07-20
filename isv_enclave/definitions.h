@@ -147,6 +147,12 @@ struct Condition{
 	Condition *nextCondition;
 };
 
+typedef struct TableSize TableSize;
+struct TableSize{
+	float tsize;  // 输入表的大小
+	float ssize;  // 结果表的大小
+};
+
 /* read or write type */
 typedef enum _RW_TYPE {
 	MEMORY,
