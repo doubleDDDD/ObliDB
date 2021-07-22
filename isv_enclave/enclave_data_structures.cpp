@@ -131,9 +131,7 @@ decryptOneBlock(Encrypted_Linear_Scan_Block *block, int tableid)
 		{
 		case INTEGER:
 			memcpy(&_int, &row[schemas[tableid].fieldOffsets[ii]], 4);
-			// if(_int != 46){
 			printf("offset:%d,val:%d\n", schemas[tableid].fieldOffsets[ii], _int);
-			// }
 			break;
 		case TINYTEXT:
 			_text = (char *)&row[schemas[tableid].fieldOffsets[ii]];

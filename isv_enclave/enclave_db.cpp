@@ -2121,7 +2121,7 @@ int selectRows(
 					//printf("ready for a comparison? %d\n", c.numClauses);
 
 					if(rowMatchesCondition(c, row, schemas[structureId]) && row[0] != '\0'){
-						/* hit */					
+						/* hit */			
 						count++;  /* hit times */
 						if(!continuous && !contTemp){
 							//first hit
@@ -2225,7 +2225,8 @@ int selectRows(
 				if(PADDING) retNumRows = PADDING;
 				//printf("%d %d %d %d %s %d %d\n", retNameLen, retNumRows, retStructId, retType, retName, retSchema.numFields, retSchema.fieldSizes[1]);
 				// printf(
-				// 	"Planer: continuous:%d,small:%d,almostAll:%d,retNumRows:%d\n", continuous, small, almostAll, retNumRows);
+				// 	"Planer: continuous:%d,small:%d,almostAll:%d,retNumRows:%d\n", 
+				// 	continuous, small, almostAll, retNumRows);
 #else
 				/**
 				 * 改造版 planer，如果有 Continuous, 就一定要用 Continuous
@@ -2652,7 +2653,7 @@ int selectRows(
 					printf("1 aborting %d %d", colChoice == -1, schemas[structureId].fieldTypes[colChoice] != INTEGER);
 					return 1;
 				}
-				//printf("here %d", structureId);
+				// printf("aggr here %d\n", structureId);
 				int winRow = -1;
 				retNumRows = 1;
 				retSchema.numFields = 2;
@@ -2663,6 +2664,7 @@ int selectRows(
 				retSchema.fieldTypes[0] = CHAR;
 				retSchema.fieldTypes[1] = INTEGER;
 				if((aggregate == 2 || aggregate == 3) && algChoice == 0){
+					// 2 means min, 3 means max
 					createTable(&schemas[structureId], retName, retNameLen, retType, retNumRows, &retStructId);
 				}
 				else{
@@ -2674,10 +2676,38 @@ int selectRows(
 						opOramBlock(baselineId, 0, oBlock, 0);
 					}
 					opOneLinearScanBlock(structureId, i, (Linear_Scan_Block*)row, 0);
+					// Linear_Scan_Block->data is uint8_t data[BLOCK_DATA_SIZE];
 					row = ((Linear_Scan_Block*)row)->data;
+
+
 					if(rowMatchesCondition(c, row, schemas[structureId]) && row[0] != '\0'){
 						count++;
-						int val = (int)row[schemas[structureId].fieldOffsets[colChoice]];
+						// 这个地方的写法确实是有问题的
+						// 可能要用memcpy copy对应的字节数才可以，坑爹玩意
+						// int val = (int)row[schemas[structureId].fieldOffsets[colChoice]];
+						int val;
+						memcpy(&val, &row[schemas[structureId].fieldOffsets[colChoice]], 4);
+
+						if(structureId==1){
+							// printf("in table 2, the v:%d, colChoice:%d, rowoffset:%d\n", val, colChoice, schemas[structureId].fieldOffsets[colChoice]);
+							// printf("try value:%ld\n", row[1]);
+
+							// int jjj;
+							// unsigned char* ppp = (unsigned char*)&row[1] + 3;
+							// for(int iii=0; iii<4; ++iii) {
+							// 	// 先打印高位地址，再打印低位地址，地址的低位是数据的低位，是小端存储
+							// 	jjj=*(ppp-iii);  // 取每一个字节的首地址，从高位字节到地位字节
+							// 	printf("%p: ", ppp-iii);
+							// 	// 处理每一个字节的8位，字节内部的二进制是按照人熟悉的形式存储的
+							// 	for(int kkk=7;kkk>=0;--kkk){
+							// 		if(jjj&(1<<kkk)) { printf("1"); }
+							// 		else { printf("0"); }
+							// 	}
+							// 	printf(" ");
+							// }
+							// printf("\n");
+						}
+
 						switch(aggregate){
 						case 1:
 							// sum
@@ -2742,10 +2772,8 @@ int selectRows(
 				if((aggregate == 2 || aggregate == 3) && algChoice == 0){
 					opLinearScanBlock(structureId, winRow, (Linear_Scan_Block*)row, 0);
 				}
-				else{
-					memcpy(&row[1], &stat, 4);
-				}
-				//printf("stat is %d", stat);
+				else{ memcpy(&row[1], &stat, 4); }
+				// printf("aggregation value, stat is %d\n", stat);
 				opOneLinearScanBlock(retStructId, 0, (Linear_Scan_Block*)row, 1);
 				numRows[retStructId]++;
 

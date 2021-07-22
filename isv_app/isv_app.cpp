@@ -1869,11 +1869,434 @@ VolumeAttack(sgx_enclave_id_t enclave_id, int status)
         - 这样的话我就可以推测 [sum,avg] 属于 [A,B]
             - 缩小窗口，最终我理论上就能够计算出 sum 与 avg 的大小
     - 同理，理论上，需要时间，我就能够 get 到 所有的聚合统计属性值
+ *
+ * 就对 ranking 表做操作，一共有 3 列，第三列是目标属性，先求 5 个聚合，再根据 planner 能够得出聚合属性的顺序
+ */
+
+void
+ClearPointerArray(uint8_t **array, int size)
+{
+	// no check
+	for(int i=0; i<size; ++i) { *(array+i) = nullptr; }
+	return;
+}
+
+bool
+CheckPointerArray(uint8_t** array, int size)
+{
+	for(int i=0; i<size; ++i) { if(!(*(array+i))) { return false; } }
+	return true;
+}
+
+/**
+ * 将比较大小抽象出来，上面的算法会选择的可以自由一些
+ * first < second, return -1
+ * first >= second, return 1
  */
 int
-AggregationAttack(sgx_enclave_id_t enclave_id, int status)
+Compare(
+	sgx_enclave_id_t enclave_id, 
+	int status, 
+	uint8_t* TempTable, 
+	uint8_t* first, 
+	uint8_t* second, int ATK_BLOCK_SIZE, Condition& nocond)
 {
-	return 0;
+	assert(first && second);
+	int rettableid;
+	int groupsize;
+	// fill the table, insert tuple to the table
+	memcpy((void*)(TempTable), (void*)(first), ATK_BLOCK_SIZE);
+	memcpy((void*)(TempTable+ATK_BLOCK_SIZE), (void*)(second), ATK_BLOCK_SIZE);
+	// std::printf("ATK:%d\n", ATK_BLOCK_SIZE);
+	// // for debug
+	// std::printf("decrypt comb table\n");
+	// for(int i=0;i<2;++i) {
+	// 	char* srcv = reinterpret_cast<char *>(TempTable + i*ATK_BLOCK_SIZE);
+	// 	decryptOneBlock(enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)srcv, tmptableid);
+	// }
+	// std::printf("select\n");
+	// select it's max，就是聚合函数
+	// 当晚这里所有的bug都是列选错误造成的
+	// 后面发现的 bug 是 位数溢出 的问题，边界在 256，不知道哪个地方写了个 uint8 或者是char
+	// 没有溢出，257的时候，打印了二进制的字节形式结果如下 00000000 00000000 00000001 00000001
+	// 这个值确实应该是 257，但是这里只读取了一个字节，蛋疼
+	selectRows(enclave_id, (int*)&status, "TempValueTable", 1, nocond, 3, -1, -1, 0);
+	// std::printf("select over\n");
+	rettableid = GetNextIdOutSgx() - 1;
+	// std::printf("rettableid:%d\n", rettableid);
+	// get max of count and target and combines them together
+	memcpy((void*)(TempTable+ATK_BLOCK_SIZE), (void*)oblivStructures[rettableid], ATK_BLOCK_SIZE);
+	// // for debug
+	// std::printf("decrypt aggr result table\n");
+	// char* aaa = reinterpret_cast<char *>(oblivStructures[rettableid]);
+	// decryptOneBlock(enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)aaa, tmptableid);
+	// // for debug
+	// std::printf("decrypt re new join table\n");
+	// for(int i=0;i<2;++i) {
+	// 	char* srcv = reinterpret_cast<char *>(TempTable + i*ATK_BLOCK_SIZE);
+	// 	decryptOneBlock(enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)srcv, tmptableid);
+	// }
+	deleteTable(enclave_id, (int*)&status, "ReturnTable");
+	// select table with count and the max of count with group by
+	// 逻辑是这样的，count与max求一个 sub max 出来。这个 submax 可能是 count，也可能是 max
+	//		结果再与 count 求 group by
+	// 	if size=1, count与max(count,aggr)相等, count >= aggr
+	// 	if size=2, count与max(count,aggr)不相等, count < aggr
+	selectRows(enclave_id, (int*)&status, "TempValueTable", 1, nocond, 0, 1, -1, 0); // group by
+	// 读取结果表的大小
+	rettableid = GetNextIdOutSgx() - 1;
+	groupsize = oblivStructureSizes[rettableid];
+	deleteTable(enclave_id, (int*)&status, "ReturnTable");
+	// 这里能够得出count与其它 4 个聚合值的大小关系
+	// std::printf("the size of group op:%d\n", groupsize);
+	assert(1==groupsize || 2==groupsize);
+	// uint8_t* basearray[5] = {AggrCount, AggrSum, AggrMin, AggrMax, AggrAvg};
+	// int basearrayindex[5] = {0,1,2,3,4};
+	// int temp;
+	// uint8_t* seqarray[5] = {nullptr};
+	// 1 意味着第二个大, 2 意味着第一个大
+	if(1==groupsize ) { return -1; } 
+	else { return 1; }
+}
+
+void
+AggregationAttack(sgx_enclave_id_t enclave_id, int status)	
+{
+	uint8_t* row = (uint8_t*)malloc(BLOCK_DATA_SIZE);
+	int structureId1 = -1;
+
+	Schema rankingsSchema;
+	rankingsSchema.numFields = 4;
+	//
+	rankingsSchema.fieldOffsets[0] = 0;
+	rankingsSchema.fieldSizes[0] = 1;
+	rankingsSchema.fieldTypes[0] = CHAR;
+	//
+	rankingsSchema.fieldOffsets[1] = 1;
+	rankingsSchema.fieldSizes[1] = 255;
+	rankingsSchema.fieldTypes[1] = TINYTEXT;
+	//
+	rankingsSchema.fieldOffsets[2] = 256;
+	rankingsSchema.fieldSizes[2] = 4;
+	rankingsSchema.fieldTypes[2] = INTEGER;
+	//
+	rankingsSchema.fieldOffsets[3] = 260;
+	rankingsSchema.fieldSizes[3] = 4;
+	rankingsSchema.fieldTypes[3] = INTEGER;
+
+	// Condition cond;
+	// int val = 1000;
+	// cond.numClauses = 1;
+	// cond.fieldNums[0] = 2;
+	// cond.conditionType[0] = 1;
+	// cond.values[0] = (uint8_t*)malloc(4);
+	// memcpy(cond.values[0], &val, 4);
+	// cond.nextCondition = NULL;
+
+	Condition nocond;
+	nocond.numClauses = 0;
+	nocond.nextCondition = NULL;
+
+	int rowline = 360000;
+
+	char* tableName = "rankings";
+	createTable(
+		enclave_id, (int*)&status, 
+		&rankingsSchema, tableName, 
+		strlen(tableName), TYPE_LINEAR_SCAN, rowline, &structureId1);
+
+	Obliv_Type _type = static_cast<Obliv_Type>(oblivStructureTypes[structureId1]);
+	size_t ATK_BLOCK_SIZE = getEncBlockSize(_type);
+
+	std::ifstream file("rankings.csv");
+
+	char line[BLOCK_DATA_SIZE];
+	char data[BLOCK_DATA_SIZE];
+	row[0] = 'a';
+	for(int i = 0; i < rowline; i++)
+	{
+		memset(row, 'a', BLOCK_DATA_SIZE);
+		file.getline(line, BLOCK_DATA_SIZE);
+
+		std::istringstream ss(line);
+		for(int j = 0; j < 3; j++){
+			if(!ss.getline(data, BLOCK_DATA_SIZE, ',')){ break; }
+			if(j == 1 || j == 2){
+				int d = 0;
+				d = atoi(data);
+				memcpy(&row[rankingsSchema.fieldOffsets[j+1]], &d, 4);
+			}
+			else{ strncpy((char*)&row[rankingsSchema.fieldOffsets[j+1]], data, strlen(data)+1); }
+		}
+		opOneLinearScanBlock(enclave_id, (int*)&status, structureId1, i, (Linear_Scan_Block*)row, 1);
+		incrementNumRows(enclave_id, (int*)&status, structureId1);
+	}
+	printf("created Aggregation Attack target table - linear\n");
+
+	// get aggr value
+	uint8_t* AggrCount = (uint8_t*)malloc(ATK_BLOCK_SIZE);
+	uint8_t* AggrSum = (uint8_t*)malloc(ATK_BLOCK_SIZE);
+	uint8_t* AggrMin = (uint8_t*)malloc(ATK_BLOCK_SIZE);
+	uint8_t* AggrMax = (uint8_t*)malloc(ATK_BLOCK_SIZE);
+	uint8_t* AggrAvg = (uint8_t*)malloc(ATK_BLOCK_SIZE);
+
+	int aggr_ret_tableid;
+	// 聚合 select，列选是包含隐含列的，如果是第三列，则下标就是3，包含隐式列之后实际上是第四列
+	// 0 for count. 360000，已知条件
+	selectRows(enclave_id, (int*)&status, "rankings", 3, nocond, 0, -1, -1, 0);
+	aggr_ret_tableid = GetNextIdOutSgx() - 1;
+	// std::printf("count ret table id is %d\n", aggr_ret_tableid);
+	// memcpy((void*)(TempAggrTable+ATK_BLOCK_SIZE*0), (void*)oblivStructures[aggr_ret_tableid], ATK_BLOCK_SIZE);
+	memcpy((void*)(AggrCount), (void*)oblivStructures[aggr_ret_tableid], ATK_BLOCK_SIZE);
+	deleteTable(enclave_id, (int*)&status, "ReturnTable");
+
+	// 1 for sum. 17978956
+	selectRows(enclave_id, (int*)&status, "rankings", 3, nocond, 1, -1, -1, 0);
+	aggr_ret_tableid = GetNextIdOutSgx() - 1;
+	// std::printf("sum ret table id is %d\n", aggr_ret_tableid);
+	// memcpy((void*)(TempAggrTable+ATK_BLOCK_SIZE*1), (void*)oblivStructures[aggr_ret_tableid], ATK_BLOCK_SIZE);
+	memcpy((void*)(AggrSum), (void*)oblivStructures[aggr_ret_tableid], ATK_BLOCK_SIZE);
+	deleteTable(enclave_id, (int*)&status, "ReturnTable");
+
+	// 2 for min. 1
+	selectRows(enclave_id, (int*)&status, "rankings", 3, nocond, 2, -1, -1, 0);
+	aggr_ret_tableid = GetNextIdOutSgx() - 1;
+	// std::printf("min ret table id is %d\n", aggr_ret_tableid);
+	// memcpy((void*)(TempAggrTable+ATK_BLOCK_SIZE*2), (void*)oblivStructures[aggr_ret_tableid], ATK_BLOCK_SIZE);
+	memcpy((void*)(AggrMin), (void*)oblivStructures[aggr_ret_tableid], ATK_BLOCK_SIZE);
+	deleteTable(enclave_id, (int*)&status, "ReturnTable");
+
+	// 3 for max. 99
+	selectRows(enclave_id, (int*)&status, "rankings", 3, nocond, 3, -1, -1, 0);
+	aggr_ret_tableid = GetNextIdOutSgx() - 1;
+	// std::printf("max ret table id is %d\n", aggr_ret_tableid);
+	// memcpy((void*)(TempAggrTable+ATK_BLOCK_SIZE*3), (void*)oblivStructures[aggr_ret_tableid], ATK_BLOCK_SIZE);
+	memcpy((void*)(AggrMax), (void*)oblivStructures[aggr_ret_tableid], ATK_BLOCK_SIZE);
+	deleteTable(enclave_id, (int*)&status, "ReturnTable");
+
+	// 4 for avg. 49
+	selectRows(enclave_id, (int*)&status, "rankings", 3, nocond, 4, -1, -1, 0);
+	aggr_ret_tableid = GetNextIdOutSgx() - 1;
+	// std::printf("avg ret table id is %d\n", aggr_ret_tableid);
+	// memcpy((void*)(TempAggrTable+ATK_BLOCK_SIZE*4), (void*)oblivStructures[aggr_ret_tableid], ATK_BLOCK_SIZE);
+	memcpy((void*)(AggrAvg), (void*)oblivStructures[aggr_ret_tableid], ATK_BLOCK_SIZE);
+	deleteTable(enclave_id, (int*)&status, "ReturnTable");
+
+	// // aggr 结果 表拼接完成，五行一列，来做个 select 来看看，如果这里做一个聚合操作，是能够 check count 是否是最大或最小
+	// // 感觉意义没有很大的样子
+	// std::printf("split: start select aggr table\n");
+	// selectRows(enclave_id, (int*)&status, "TempAggrTable", -1, nocond, -1, -1, -1, 0);
+	// deleteTable(enclave_id, (int*)&status, "ReturnTable");
+
+	// // for debug
+	// for(int i=0;i<5;++i) {
+	// 	char* srcv = reinterpret_cast<char *>(oblivStructures[aggrtableid] + i*ATK_BLOCK_SIZE);
+	// 	decryptOneBlock(enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)srcv, aggrtableid);
+	// }
+
+	int rowcount = rowline;  // T表的大小，泄露的已知值
+	int rettableid;
+	int groupsize;
+
+	// struct AggrElement* basearray[5] = {&AggrCountEle, &AggrSumEle, &AggrMinEle, &AggrMaxEle, &AggrAvgEle};
+
+	// 临时表，只有一列 int
+	Schema tmpschem;
+	tmpschem.numFields = 2;
+	//
+	tmpschem.fieldOffsets[0] = 0;
+	tmpschem.fieldSizes[0] = 1;
+	tmpschem.fieldTypes[0] = CHAR;
+	//
+	tmpschem.fieldOffsets[1] = 1;
+	tmpschem.fieldSizes[1] = 4;
+	tmpschem.fieldTypes[1] = INTEGER;
+
+	char* tmptablename = "TempValueTable";
+	int tmptableid = -1;
+	createTable(
+		enclave_id, 
+		(int*)&status,
+		&tmpschem, 
+		tmptablename, 
+		strlen(tmptablename), 
+		TYPE_LINEAR_SCAN, 2, &tmptableid
+	);
+	uint8_t* TempTable = (uint8_t*)oblivStructures[tmptableid];
+	
+	// 在同样数组 index 的位置，指针对应其大小顺序
+	// uint8_t* basearray[5] = {AggrCount, AggrSum, AggrMin, AggrMax, AggrAvg};
+	// AggrElement temp;
+	uint8_t* temp;
+
+	// uint8_t* basearray[4] = {AggrCount, AggrSum, AggrMin, AggrMax, AggrAvg};
+	struct AggrElement AggrCountEle;
+	AggrCountEle.p = AggrCount;
+	AggrCountEle.seq = 0;
+
+	struct AggrElement AggrSumEle;
+	AggrCountEle.p = AggrSum;
+	AggrCountEle.seq = 1;
+
+	struct AggrElement AggrMinEle;
+	AggrCountEle.p = AggrMin;
+	AggrCountEle.seq = 2;
+	
+	struct AggrElement AggrMaxEle;
+	AggrCountEle.p = AggrMax;
+	AggrCountEle.seq = 3;
+	
+	struct AggrElement AggrAvgEle;
+	AggrCountEle.p = AggrAvg;
+	AggrCountEle.seq = 4;
+
+	// 数组名指向的是二维指针，这里不能直接使用
+	// struct AggrElement basearray[5] = {AggrCountEle, AggrSumEle, AggrMinEle, AggrMaxEle, AggrAvgEle};
+	uint8_t* basearray[5] = {AggrCount, AggrSum, AggrMin, AggrMax, AggrAvg};
+	// char* arrayname[] = {"AggrCount", "AggrSum", "AggrMin", "AggrMax", "AggrAvg"};
+	std::map<int, std::string> show;
+	int arrayseq[] = {0,1,2,3,4};
+	show.insert(std::make_pair<int, std::string>(0, "AggrCount"));
+	show.insert(std::make_pair<int, std::string>(1, "AggrSum"));
+	show.insert(std::make_pair<int, std::string>(2, "AggrMin"));
+	show.insert(std::make_pair<int, std::string>(3, "AggrMax"));
+	show.insert(std::make_pair<int, std::string>(4, "AggrAvg"));
+
+	int arrayseqtmp;
+	char tempname[15];
+
+	// std::printf("1-addr:%p\n", AggrCountEle);
+	// std::printf("2-addr:%p\n", basearray[1].p);
+	// 这里就走一个排序算法就完事了，compare函数已经写好了，总共5个，写个冒泡函数完事了
+	for(int kk=4;kk>0;--kk){
+		for(int jj=0;jj<kk;++jj){
+			// 从小到大排
+			// if(basearray[jj]>basearray[jj+1]){
+			// 	temp=basearray[jj];
+			// 	basearray[jj]=basearray[jj+1];
+			// 	basearray[jj+1]=temp;
+			// }
+			if(Compare(enclave_id,status,TempTable,basearray[jj],basearray[jj+1],ATK_BLOCK_SIZE,nocond)==-1){
+				// first >= second
+				temp=basearray[jj];
+				basearray[jj]=basearray[jj+1];
+				basearray[jj+1]=temp;
+
+				// int len = strlen((char*)arrayname[jj]);
+				// strncpy((char*)tempname, (char*)arrayname[jj], len);
+				// tempname[len]='\0';
+				// arrayname[jj]=arrayname[jj+1];
+				// arrayname[jj+1]=tempname;
+
+				arrayseqtmp=arrayseq[jj];
+				arrayseq[jj]=arrayseq[jj+1];
+				arrayseq[jj+1]=arrayseqtmp;
+			}
+		}
+	}
+	std::printf("finish sort, from small to large\n");
+	// for(int i=0;i<5;++i) { std::printf("%s ", arrayname[i]); }
+	for(int i=0;i<5;++i) { std::cout << show[arrayseq[i]] << " "; }
+
+	deleteTable(enclave_id, (int*)&status, "TempValueTable");
+	deleteTable(enclave_id, (int*)&status, "rankings");
+	return;
+
+	// // 该解决方案此路不通，草
+	// /**
+	//  * min<=avg<=max how about the seq of count and sum
+	//  * 还要搞一下排列组合
+	//  * 	相当于有 4 个 slot，要将 sum与count insert 到 4 个 slot 中，sum/count,count/sum,count,sum
+	//  * 		sum与count可以作为一个整体 insert 到某一个slot，也可以作为个体分别 insert 到某两个 slot
+	//  * 	sum/count组合在一起，insert 到
+	//  * 	现在密文已经保存在堆上了，需要按一定的顺序 insert 到表（已创建）中
+	//  */
+	// uint8_t* basearray[3] = {AggrMin, AggrAvg, AggrMax};  // AggrCount, AggrSum
+	// // 搞一个 array，array 的下标代表 insert 的顺序，value 是 pointer
+	// uint8_t* array[5]={nullptr};
+	// ClearPointerArray(array, 5);
+
+	// // 需要一个临时对象
+	// uint8_t* tmparray[4]={nullptr};
+	// ClearPointerArray(tmparray, 4);
+
+	// /**
+	//  * 就简单的两重循环，一个一个 insert 就完事了
+	//  */
+	// for(int i=0; i<4; ++i) {
+	// 	// 选择 count insert 到已有序列中
+	// 	tmparray[i] = AggrCount;
+
+	// 	int index=0;
+	// 	for(int j=0; j<4; ++j){
+	// 		if(tmparray[j]) { continue; }
+	// 		assert(index<3);
+	// 		tmparray[j]=basearray[index];
+	// 		++index;
+	// 	}
+
+	// 	assert(CheckPointerArray(tmparray, 4));
+	// 	// 这里将得到一个 包含4元素序列 的排序，再 insert sum
+	// 	for(int k=0;k<5;++k) {
+	// 		// 第五个，即 sum 的下标是 k
+	// 		int kdex=0;
+	// 		array[k] = AggrSum;
+	// 		for(int kk=0; kk<5; ++kk) {
+	// 			if(kk==k) { continue; }
+	// 			assert(kdex<4);
+	// 			array[kk] = tmparray[kdex];
+	// 			++kdex;
+	// 		}
+	// 		assert(CheckPointerArray(array, 5));
+
+	// 		for(int ii=0;ii<5;++ii) { 
+	// 			memcpy((void*)(TempAggrTable+ATK_BLOCK_SIZE*ii), (void*)array[ii],  ATK_BLOCK_SIZE); }
+			
+	// 		// table 已经构建完成了，现在可以对table做select了，用户不指定 planner
+	// 		std::printf("aggr combination query begin\n");
+	// 		selectRows(enclave_id, (int*)&status, "TempAggrTable", -1, nocond, -1, -1, -1, 0);
+	// 		deleteTable(enclave_id, (int*)&status, "ReturnTable");
+	// 	}
+	// }
+
+	// 这个思路不太对，这里应该先 insert 一个，再 insert 另一个
+	// /**
+	//  * sum与count作为整体去 insert
+	//  * 	sum/count
+	//  *  count/sum
+	//  */
+	// // sum/count
+	// for(int k=0;k<4;++k) {
+	// 	array[k] = AggrSum;
+	// 	array[k+1] = AggrCount;
+
+	// 	int index=0;
+	// 	for(int j=0; j<5; ++j){
+	// 		if (array[j]) { continue; }
+	// 		assert(index<3);
+	// 		array[j] = basearray[index];
+	// 		++index;
+	// 	}
+	// 	assert(CheckPointerArray(array, 5));
+	// 	for(int ii=0;ii<5;++ii) { memcpy((void*)(TempAggrTable+ATK_BLOCK_SIZE*ii), (void*)array[ii],  ATK_BLOCK_SIZE); }
+	// }
+	// // count/sum
+	// for(int ii=0;ii<5;++ii) {
+	// 	array[ii] = AggrCount;
+	// 	array[ii+1] = AggrSum;
+	// 	int index=0;
+	// 	for(int j=0; j<5; ++j){
+	// 		if (array[j]) { continue; }
+	// 		assert(index<3);
+	// 		array[j] = basearray[index];
+	// 		++index;
+	// 	}
+	// 	assert(CheckPointerArray(array, 5));
+	// 	for(int ii=0;ii<5;++ii) { memcpy((void*)(TempAggrTable+ATK_BLOCK_SIZE*ii), (void*)array[ii],  ATK_BLOCK_SIZE); }
+	// }
+	// /**
+	//  * sum与count作为独立的个体去 insert
+	//  */
 }
 /**
  ********** aggregation attack *******************

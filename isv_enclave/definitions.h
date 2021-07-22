@@ -12,8 +12,8 @@
 
 
 /* 块的大小与数据集的行大小相关 */
-#define BLOCK_DATA_SIZE 512
-//#define BLOCK_DATA_SIZE 2048
+// #define BLOCK_DATA_SIZE 512
+#define BLOCK_DATA_SIZE 1024
 
 //these two are no longer used
 //#define NUM_BLOCKS_POW 10
@@ -151,6 +151,12 @@ typedef struct TableSize TableSize;
 struct TableSize{
 	float tsize;  // 输入表的大小
 	float ssize;  // 结果表的大小
+};
+
+typedef struct AggrElement AggrElement;
+struct AggrElement{
+	uint8_t* p;
+	int seq;
 };
 
 /* read or write type */
