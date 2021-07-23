@@ -2094,7 +2094,6 @@ AggregationAttack(sgx_enclave_id_t enclave_id, int status)
 	// 	decryptOneBlock(enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)srcv, aggrtableid);
 	// }
 
-	int rowcount = rowline;  // T表的大小，泄露的已知值
 	int rettableid;
 	int groupsize;
 
@@ -2197,8 +2196,76 @@ AggregationAttack(sgx_enclave_id_t enclave_id, int status)
 	std::printf("finish sort, from small to large\n");
 	// for(int i=0;i<5;++i) { std::printf("%s ", arrayname[i]); }
 	for(int i=0;i<5;++i) { std::cout << show[arrayseq[i]] << " "; }
+	std::printf("\n\n");
+	deleteTable(enclave_id, (int*)&status, "TempValueTable");  // TempValueTable 是一个两行的表，现在用不到了已经
 
-	deleteTable(enclave_id, (int*)&status, "TempValueTable");
+	// next stage
+	// 构建一个新表，5行的表，按顺序来保存 目标列的 聚合值
+	Schema aggrsortschem;
+	aggrsortschem.numFields = 2;
+	//
+	aggrsortschem.fieldOffsets[0] = 0;
+	aggrsortschem.fieldSizes[0] = 1;
+	aggrsortschem.fieldTypes[0] = CHAR;
+	//
+	aggrsortschem.fieldOffsets[1] = 1;
+	aggrsortschem.fieldSizes[1] = 4;
+	aggrsortschem.fieldTypes[1] = INTEGER;
+
+	char* sortaggrtablename = "AggrSortTable";
+	int sortaggrtableid = -1;
+	createTable(
+		enclave_id, 
+		(int*)&status,
+		&aggrsortschem, 
+		sortaggrtablename, 
+		strlen(sortaggrtablename), 
+		TYPE_LINEAR_SCAN, 5, &sortaggrtableid
+	);
+
+	uint8_t* SortAggrTable = (uint8_t*)oblivStructures[sortaggrtableid];
+	// 构建新的排序表
+	for(int j=0;j<5;++j){
+		memcpy((void*)(SortAggrTable+ATK_BLOCK_SIZE*j), (void*)basearray[arrayseq[j]], ATK_BLOCK_SIZE);
+	}
+
+	// 需要自然数区上的窗口去滑动了，count 只能作为一个边界
+	int rowcount = rowline;  // T表的大小，泄露的已知值
+	// 在本例中，排序序列是 AggrMin AggrAvg AggrMax AggrCount AggrSum，其中 AggrCount=360000
+	/**
+	 * 得要重新理一下思路，现在要用 continuous 去测试一下，找一下上界与下界，条件测试，结果表的大小
+	 * 	因为现在是排序表，所以用 [] 去滑动，根据泄露的结果表大小（需要强制指定 continuous 算法，否则 planner 会自动选择 almostall 算法）
+	 * 	根据结果表的的大小，我能够首先确定 AggrMin 与 AggrSum 的值
+	 * 		它会大于其中一个值，小于另一个值
+	 * 先找一个上下界，再去二分
+	 */
+
+	// 如何根据 AggrCount=360000 确定上下界呢，各加减这个数吧，然后二分
+	int beginsize=5, tuplenum=5;
+	int ghighest=2*rowcount;
+
+	while(  tuplenum!=beginsize       ){
+		int low = 10, high = 13, lower = 9, higher = 14;
+		Condition windowcond;
+		windowcond.numClauses = 2;
+		windowcond.fieldNums[0] = 1;
+		windowcond.fieldNums[0] = 1;
+		windowcond.conditionType[0] = 1;
+		windowcond.conditionType[0] = -1;
+		windowcond.values[0] = (uint8_t*)&lower;
+		windowcond.values[1] = (uint8_t*)&higher;
+		windowcond.nextCondition = NULL;
+
+		selectRows(enclave_id, (int*)&status, "AggrSortTable", -1, windowcond, -1, -1, 1, 0);  // 1 means continuous
+		tuplenum = oblivStructureSizes[sortaggrtableid];
+		std::printf("size of s:%d\n", tuplenum);
+		deleteTable(enclave_id, (int*)&status, "AggrSortTable");
+	}
+
+
+
+	int glowest=0;
+
 	deleteTable(enclave_id, (int*)&status, "rankings");
 	return;
 
