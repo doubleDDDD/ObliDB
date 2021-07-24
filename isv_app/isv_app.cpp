@@ -1064,6 +1064,19 @@ PureContinueAT(sgx_enclave_id_t enclave_id, int status)
 		}
 	}
 
+
+
+
+
+
+
+
+
+
+
+
+
+
 	int tableid = i;
 	oblidbextraio::DBTable* targettable = dbtables[i];
 	int orgrownum = targettable->TableSize();
@@ -2238,14 +2251,28 @@ AggregationAttack(sgx_enclave_id_t enclave_id, int status)
 	 * 	根据结果表的的大小，我能够首先确定 AggrMin 与 AggrSum 的值
 	 * 		它会大于其中一个值，小于另一个值
 	 * 先找一个上下界，再去二分
+	 * 我首先给一个 window [low, high]
+	 * 按照这个作为条件去测 value，如果发现结果不是5的时候得能够确定，是上界的问题还是下界的问题
+	 * 当结果变成4的时候，可以check一下结果表的最大值或最小值，看一下是谁的问题
+	 * 
+	 * 应该先将范围扩大，扩大到结果是5，然后再缩小，从左或右缩小这个是自己能够确定的，所以这里是能够确定范围的
 	 */
 
 	// 如何根据 AggrCount=360000 确定上下界呢，各加减这个数吧，然后二分
-	int beginsize=5, tuplenum=5;
+	int beginsize=5, tuplenum=0;
 	int ghighest=2*rowcount;
+	int low, lower;  // 预设的下限
+	int high, higher;  // 预设的上限
 
-	while(  tuplenum!=beginsize       ){
-		int low = 10, high = 13, lower = 9, higher = 14;
+	std::printf("start find the value of up and down!");
+	// 首先要判断一个绝对上界限与绝对下界限
+	while(tuplenum!=beginsize) {
+		// int beginsize=5, tuplenum=0;
+		low = 0;
+		lower = -1;
+		high = ghighest;
+		higher = ghighest+1;
+
 		Condition windowcond;
 		windowcond.numClauses = 2;
 		windowcond.fieldNums[0] = 1;
@@ -2258,8 +2285,14 @@ AggregationAttack(sgx_enclave_id_t enclave_id, int status)
 
 		selectRows(enclave_id, (int*)&status, "AggrSortTable", -1, windowcond, -1, -1, 1, 0);  // 1 means continuous
 		tuplenum = oblivStructureSizes[sortaggrtableid];
-		std::printf("size of s:%d\n", tuplenum);
+		// std::printf("size of s:%d\n", tuplenum);
 		deleteTable(enclave_id, (int*)&status, "AggrSortTable");
+
+		// if(tuplenum<5) {
+		// 	// 需要继续扩大范围
+		// 	;
+		// }
+		// 上界与下界是可用的
 	}
 
 
