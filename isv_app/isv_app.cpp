@@ -2394,144 +2394,34 @@ AggregationAttack(sgx_enclave_id_t enclave_id, int status)
 	std::printf("For the agg seq, abs up limit:%d, down limit:%d,times:%d\n", high, low, times);
 
 	// 先找下界
-	// SqueezeForValue(enclave_id, status, low, high);
-
-
-
-
-
-
-
-
-
-
-
-
-	// 在绝对上下界的情况下，开始增加下界，寻找最小值
-	// 这个地方实际上是需要找一个游标，不断逼近到 min
-	// 跳出循环应该是 游标逼近到了 min
-	// 跨越正负的过程比我想象的要复杂，交界处需要单独处理，还是思考一个不需要 care 交界的算法来解决这个问题
-	// 在找下界的过程中，没有所谓的二分法，因为我只有一个 value，我所拥有的并非是一个排序的范围，所以严格来说，这个不是二分
-	// abs 下界游标在右移的过程中，增量是需要被二分的，这个取决于自己初始设定的增量的大小，先随意set一个，然后再 二分 缩小即可
-	// oblidb 提供的是大于 小于，没有带等号，如果自己要加带等号的，则需要 lower or higher
-	// 如果上一次的操作是 add，且本次的操作也是 add, 则 add 加倍，否则在区间中震动的不加倍
-	int add=100;
-	low += add;
-	lower = low-1;
-	bool preadd = true;
-
-	while (add!=0)
-	{
-		// std::printf("low:%d, add:%d\n", low, add);
-
-		Condition windowcond;
-		windowcond.numClauses = 2;
-		windowcond.fieldNums[0] = 1;
-		windowcond.fieldNums[1] = 1;
-		windowcond.conditionType[0] = 1;
-		windowcond.conditionType[1] = -1;
-		windowcond.values[0] = (uint8_t*)&lower;
-		windowcond.values[1] = (uint8_t*)&higher;
-		windowcond.nextCondition = NULL;
-
-		selectRows(enclave_id, (int*)&status, "AggrSortTable", -1, windowcond, -1, -1, 2, 0);  // 1 means continuous
-		_rettableid = GetNextIdOutSgx() - 1;
-		tuplenum = oblivStructureSizes[_rettableid];
-		// std::printf("in find abs down, size of s:%d\n\n", tuplenum);
-		deleteTable(enclave_id, (int*)&status, "ReturnTable");
-
-		if(tuplenum==5){
-			// 如果没到，则线性加，如果差距过大，可能会使得性能极具降低
-			if(preadd) { add *= 2; }
-			else {
-				// 某一次的结果是 4，low 就会左移一个 add, 然后发现结果变成了 5，所以 low 又需要右移
-				// 这个的右移动不能是之前的那个add，否则这个结果其实已经是计算过的了，所以 add 需要折半
-				add /= 2;
-			}
-			low += add;
-		} else {
-			// 如果已经超过了，则说明上一次 add 加多了
-			// 只需要加一半就可以了，即在当前游标的减去增量的一半就可以了
-			if(add>=2) { add /= 2; }
-			low -= add;
-			preadd=false;
-		}
-		lower = low-1;
-	}
-
+	low = SqueezeForValue(enclave_id, status, low, high, 5, true);
 	if(!result[0]) { result[0] = low; }
 	std::printf("Result down limit:%d\n", low);
 
-
-	// 用同样的方法可以去找上界
-	int des=100;
-	high -= des;
-	higher = higher-1;
-	bool predes = true;  // 连续des时，需要按照指数去进行
-
-	while (des!=0)
-	{
-		// std::printf("high:%d, des:%d\n", high, des);
-		Condition windowcond;
-		windowcond.numClauses = 2;
-		windowcond.fieldNums[0] = 1;
-		windowcond.fieldNums[1] = 1;
-		windowcond.conditionType[0] = 1;
-		windowcond.conditionType[1] = -1;
-		windowcond.values[0] = (uint8_t*)&lower;
-		windowcond.values[1] = (uint8_t*)&higher;
-		windowcond.nextCondition = NULL;
-
-		selectRows(enclave_id, (int*)&status, "AggrSortTable", -1, windowcond, -1, -1, 2, 0);  // 1 means continuous
-		_rettableid = GetNextIdOutSgx() - 1;
-		tuplenum = oblivStructureSizes[_rettableid];
-		// std::printf("in find abs up, size of s:%d\n\n", tuplenum);
-		deleteTable(enclave_id, (int*)&status, "ReturnTable");
-
-		if(tuplenum==5){
-			// 如果没到，则线性加，如果差距过大，可能会使得性能极具降低
-			if(predes) { des *= 2; }
-			else { des /= 2; }
-			high -= des;
-		} else {
-			if(des>=2) { des /= 2; }
-			high += des;
-			predes=false;
-		}
-		higher = high+1;
-	}
+	// 再找上界
+	high = SqueezeForValue(enclave_id, status, low, high, 5, false);
 	if(!result[4]) { result[4] = high; }
-	// std::printf("Result up limit:%d\n", high);
-
+	std::printf("Result up limit:%d\n", high);
 
 	// 整个序列的上界与下界都已经确定了，现在其实可以挨个确定序列中每一个值的大小，从前向后或从后先前都可以
 	// 从前向后确定各个 value
-	while (true)
-	{
-		Condition windowcond;
-		windowcond.numClauses = 2;
-		windowcond.fieldNums[0] = 1;
-		windowcond.fieldNums[1] = 1;
-		windowcond.conditionType[0] = 1;
-		windowcond.conditionType[1] = -1;
-		windowcond.values[0] = (uint8_t*)&lower;
-		windowcond.values[1] = (uint8_t*)&higher;
-		windowcond.nextCondition = NULL;
+	// 没有考虑等于号的影响
+	int second, third, fourth;  // 中间的是三个值
+	second = SqueezeForValue(enclave_id, status, low+1, high, 4, true);
+	if(!result[1]) { result[1] = second; }
+	std::printf("Result second:%d\n", second);
 
-		selectRows(enclave_id, (int*)&status, "AggrSortTable", -1, windowcond, -1, -1, 2, 0);
-		_rettableid = GetNextIdOutSgx() - 1;
-		tuplenum = oblivStructureSizes[_rettableid];
-		deleteTable(enclave_id, (int*)&status, "ReturnTable");
+	third = SqueezeForValue(enclave_id, status, second+1, high, 3, true);
+	if(!result[2]) { result[2] = third; }
+	std::printf("Result third:%d\n", third);
 
-		std::printf("only test once: %d\n", tuplenum);
-
-		break;
-	}
+	fourth = SqueezeForValue(enclave_id, status, third+1, high, 2, true);
+	if(!result[3]) { result[3] = fourth; }
+	std::printf("Result fourth:%d\n\n", fourth);
 
 	for(int l=0;l<5;++l) { std::printf("%ld ", result[l]); }
 	std::printf("\n\n");
 
-	// TODO 最后需要整合代码
 	deleteTable(enclave_id, (int*)&status, "rankings");
 	return;
 
