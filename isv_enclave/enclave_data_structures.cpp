@@ -131,11 +131,11 @@ decryptOneBlock(Encrypted_Linear_Scan_Block *block, int tableid)
 		{
 		case INTEGER:
 			memcpy(&_int, &row[schemas[tableid].fieldOffsets[ii]], 4);
-			printf("offset:%d,val:%d\n", schemas[tableid].fieldOffsets[ii], _int);
+			printf("offset:%d,val:%d ", schemas[tableid].fieldOffsets[ii], _int);
 			break;
 		case TINYTEXT:
 			_text = (char *)&row[schemas[tableid].fieldOffsets[ii]];
-			printf("offset:%d,val:%s\n", schemas[tableid].fieldOffsets[ii], _text);
+			printf("offset:%d,val:%s ", schemas[tableid].fieldOffsets[ii], _text);
 			break;
 		default:
 			/* CHAR */
@@ -143,6 +143,7 @@ decryptOneBlock(Encrypted_Linear_Scan_Block *block, int tableid)
 			// printf("offset:%d,val:%c\n", schemas[tableid].fieldOffsets[ii], _char);
 			break;
 		}
+		printf("\n");
 	}
 #else
 	memcpy(&val, &row[schemas[tableid].fieldOffsets[3]], 4);
